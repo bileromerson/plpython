@@ -156,12 +156,21 @@ def processar_csv(csv_file, Id):
             if len(line) < 3: continue
             url = line[ROW]
 <<<<<<< HEAD
+<<<<<<< Updated upstream
             if PlName != None or PlName != False:
                 playlist_name = line[PlName]
             print(url)
 =======
             
 >>>>>>> 1d8a0f8 (inicio da implementação dos argumentos para vercao 2.2.0)
+=======
+            
+=======
+            if PlName != None or PlName != False:
+                playlist_name = line[PlName]
+            print(url)
+>>>>>>> bileromerson/feature/parametros
+>>>>>>> Stashed changes
             if url.startswith('http'):
                 print(f"Verificando: {url}")
                 if verificar_downloads(url):
@@ -217,16 +226,30 @@ if __name__ == "__main__":
     for csv_file in csvs:
         print(f"Processando arquivo: {csv_file}")
 <<<<<<< HEAD
+<<<<<<< Updated upstream
         processar_csv(csv_file, int(mainVar.PlName))
 =======
         processar_csv(csv_file, mainVar.Id)
 
 >>>>>>> 1d8a0f8 (inicio da implementação dos argumentos para vercao 2.2.0)
+=======
+        processar_csv(csv_file, mainVar.Id)
+
+=======
+        processar_csv(csv_file, int(mainVar.PlName))
+>>>>>>> bileromerson/feature/parametros
+>>>>>>> Stashed changes
 
 
 
 # python3 plpython.py --PlName 3 -Id --row 5 -Pp
 <<<<<<< HEAD
+<<<<<<< Updated upstream
 baixar_musica
 =======
 >>>>>>> 1d8a0f8 (inicio da implementação dos argumentos para vercao 2.2.0)
+=======
+=======
+baixar_musica
+>>>>>>> bileromerson/feature/parametros
+>>>>>>> Stashed changes
