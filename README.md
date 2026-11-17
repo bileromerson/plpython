@@ -1,48 +1,100 @@
 # pltube
 
-2.1.0(beta)
-The bast playlist downloader of the world
+Ferramenta em Python para baixar áudios de URLs do YouTube listadas em arquivos CSV e criar playlists no formato M3U. O programa usa os metadados do YouTube/yt-dlp para identificar os artistas.
 
-o **pltube** foi criado com o objetivo de faser um backup offline de todas suas musicas junto com as playlists para voce nunca perder suas musicas favoritas e conseguir ouvir de qualquer lugar, no momento nos temos apenas a opcao pelo youtube mas estou pensando em faser versoes com acesso ao spotfy e outros.
+## Requisitos
 
-## Uprades por em quanto:
+- Python 3.10 ou superior
+- Dependências Python: `pip install -r requirements.txt`
+- FFmpeg disponível no sistema para converter o áudio para MP3 e incorporar metadados/miniaturas
 
-✅️ downloads de CSVs
+## Uso
 
-✅️ criacao de playlists
+Por padrão, o programa procura arquivos `.csv` diretamente na pasta atual, salva as músicas em `songs/<artista>/` e cria as playlists em `playlists/`:
 
-✅️ sincronizacao de playlists
+```bash
+python pltube.py
+```
 
-✅️ interfase com parametros alteraveis facilmente
+Para processar um CSV específico e apontar a coluna da URL (o índice começa em zero; o padrão é `2`):
 
-✅️ criacao de playlists
+```bash
+python pltube.py --lista csvs/Alone.csv --row 2
+```
 
-❌️ acrecimo de cookies de navegacao para melhor esperiencia
+Também é possível configurar as pastas:
 
-❌️ outras formas de playlist (M3U8, WPL, XSPF)
+```bash
+python pltube.py --BaseDir ./csvs --SongsDir ./songs --PlaylistDir ./playlists --LogFile ./Logs.txt
+```
 
-❌️ outras fomas de audio + formas de baixar videos (MP4, WAV, AVI)
+Para ativar **opcionalmente** a organização sem duplicar o áudio, use `--artist-links` (ou `--links-artista`):
 
-❌️ personalizacao de metadados ( Tumbnail, descricao, artista)
+```bash
+python pltube.py --lista csvs/Alone.csv --artist-links
+```
 
-❌️ conexoes com apps diretamente (YoutubeMusic, Spotify, SoundCloud, Bandcamp)
+Nesse modo, cada música é baixada uma vez em `songs/_library/`. O programa cria um link para esse arquivo dentro da pasta de cada artista que os metadados do YouTube informarem, inclusive em colaborações. Ele tenta usar links simbólicos e, se o sistema não permitir, tenta hard links; nenhum dos dois copia o conteúdo do áudio. Sem a opção, continua usando a pasta do artista principal como antes.
 
-❌️ sincronizacao de playlists
+Para acrescentar itens à playlist existente sem repetir caminhos já presentes:
 
-❌️ conexoes com outros apps
+```bash
+python pltube.py --lista csvs/Alone.csv --append
+```
 
-# ----- !!!ATENCAO!!! -----
+Se o YouTube responder com um bloqueio temporário ou limite de requisições, você pode habilitar esperas progressivas com `--esperar-bloqueio` (alias `--wait-on-limit`):
 
-estou fasendo a partir do esquema de CSV do site [https://sanishtech.com](https://sanishtech.com/tools/youtube-playlist-link-extractor) que usa os links na coluna 2 para alterar use **-r ou --row
+```bash
+python pltube.py --lista csvs/Alone.csv --esperar-bloqueio
+```
 
-**
+Esse modo tenta novamente após 30 segundos, dobrando a espera a cada falha até o limite de 10 minutos. Ele faz no máximo 6 novas tentativas e então interrompe o processamento da playlist, em vez de continuar enviando requisições enquanto o acesso estiver bloqueado. Sem o parâmetro, não há espera automática; ao detectar um bloqueio, a playlist é interrompida. `-h` ou `--help` mostra todas as opções.
 
-**Este e um projeto pessoal, estou fasendo como um hobby**
+As falhas são registradas em `Logs.txt` por padrão. Os testes locais podem ser executados com:
 
-se quiser me apoiar falando mais mrlhorias e bugs encontrados ficarei feliz.
+```bash
+python -m unittest discover -s tests -v
+```
 
-## requerimentos:
+## Observações
 
-* spotipy
-* yt-dlp
-* python3
+- CSVs devem ter cabeçalho e uma coluna com URL do vídeo. Se o formato for diferente, ajuste `--row`.
+- `--row` aceita índices negativos, como `-1` para a última coluna.
+- O tempo de bloqueio é decidido pelo YouTube e não tem uma duração fixa que o programa possa prever. A opção de espera apenas consulta novamente com pausas crescentes; ela não remove bloqueios de IP, exigências de login ou CAPTCHA.
+- O código ignora linhas sem URLs HTTP(S) e continua o processamento se uma música falhar.
+- A identificação de vários artistas usa o campo `artists` dos metadados quando disponível. Créditos explícitos de participação (`feat.`/`ft.`) no campo `artist` também são reconhecidos.
+
+## Consulta de playlists Spotify
+
+O módulo separado `spotify_playlist_viewer.py` consulta e mostra as faixas de uma playlist Spotify autorizada. Ele não baixa áudio, não cria cópias locais da lista e não usa os dados do Spotify para procurar downloads em outros serviços.
+
+A Web API oficial disponibiliza os itens e metadados da playlist, mas proíbe baixar o conteúdo de áudio. Para escutar offline, use o botão **Download** no app Spotify com Premium; os arquivos ficam disponíveis dentro do app, não como MP3s exportáveis.
+
+Para usar o visualizador, crie um app no [Spotify for Developers](https://developer.spotify.com/dashboard), cadastre um Redirect URI como `http://127.0.0.1:8888/callback` nas configurações desse app e defina as três variáveis abaixo no terminal:
+
+```bash
+export SPOTIFY_CLIENT_ID="seu_client_id"
+export SPOTIFY_CLIENT_SECRET="seu_client_secret"
+export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8888/callback"
+python spotify_playlist_viewer.py "https://open.spotify.com/playlist/ID_DA_PLAYLIST"
+```
+
+Na primeira execução, o navegador abre para autorizar a leitura. A API pode limitar o acesso a playlists que pertencem à conta autenticada ou nas quais ela é colaboradora. O token OAuth fica no cache privado `~/.cache/pltube/`, e as faixas são apenas exibidas no terminal.
+
+## Migrar músicas que já foram baixadas
+
+Se as músicas ainda estão em `songs/<artista>/` porque foram baixadas antes de ativar `--artist-links`, use o script separado `sincronizar_biblioteca.py`. Primeiro ele só mostra o que faria, sem alterar arquivos:
+
+```bash
+python sincronizar_biblioteca.py --root songs
+```
+
+Revise o plano. Para aplicar a mudança, repita com `--apply`:
+
+```bash
+python sincronizar_biblioteca.py --root songs --apply
+```
+
+No conjunto de exemplos deste repositório, os áudios estão em `csvs/songs`, então use `--root csvs/songs` nos dois comandos acima.
+
+O script move cada áudio uma vez para `<root>/_library/`, substitui o caminho antigo por um link e remove cópias idênticas repetidas. Assim, playlists M3U que usam os caminhos antigos continuam apontando para os links. Ele usa tags de artista embutidas quando disponíveis e, na falta delas, considera a pasta atual como artista. Instale `requirements.txt` para habilitar a leitura das tags. A biblioteca não é baixada novamente. Faça uma cópia de segurança antes de aplicar qualquer migração em uma pasta com dados importantes.
