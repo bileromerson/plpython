@@ -24,7 +24,7 @@ except ImportError:  # Mantém helpers e testes importáveis sem a dependência 
 
 BASE_DIR = os.getcwd()
 SONGS_DIR = BASE_DIR
-PLAYLISTS_DIR = BASE_DIR
+PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 LOG_FILE = os.path.join(BASE_DIR, "Logs.txt")
 ROW = 2
 ARTIST_LINKS = False
@@ -47,7 +47,11 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
     SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else BASE_DIR
-    PLAYLISTS_DIR = os.path.abspath(args.playlist_dir) if args.playlist_dir else BASE_DIR
+    PLAYLISTS_DIR = (
+        os.path.abspath(args.playlist_dir)
+        if args.playlist_dir
+        else os.path.join(BASE_DIR, "playlists")
+    )
     LOG_FILE = os.path.abspath(args.log_file) if args.log_file else os.path.join(BASE_DIR, "Logs.txt")
     ROW = args.row
     ARTIST_LINKS = args.artist_links
@@ -1537,7 +1541,10 @@ def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Baixa músicas de CSVs do YouTube e cria playlists M3U")
     parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta dos CSVs (padrão: diretório atual)")
     parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas; sem esta opção, usa diretamente BaseDir")
-    parser.add_argument("-p", "--PlaylistDir", dest="playlist_dir", help="Pasta das M3Us; sem esta opção, usa diretamente BaseDir")
+    parser.add_argument(
+        "-p", "--PlaylistDir", dest="playlist_dir",
+        help="Pasta das M3Us (padrão: <BaseDir>/playlists)",
+    )
     parser.add_argument("-l", "--LogFile", dest="log_file", help="Arquivo de log (padrão: Logs.txt)")
     parser.add_argument("--lista", help="Caminho de um CSV específico; sem esta opção, processa os CSVs da pasta base")
     parser.add_argument("--row", type=int, default=2, help="Índice da coluna da URL, começando em 0 (padrão: 2; aceita índices negativos)")

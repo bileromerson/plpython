@@ -806,7 +806,7 @@ class PltubeTests(unittest.TestCase):
         self.assertTrue(args.exigir_artista_musicbrainz)
         self.assertEqual(args.state_file, "cache.sqlite3")
 
-    def test_base_dir_sem_pastas_de_saida_usa_diretorio_dos_csvs(self):
+    def test_base_dir_padrao_salva_m3u_na_pasta_playlists(self):
         with tempfile.TemporaryDirectory() as temp:
             antigos = (pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR)
             try:
@@ -814,7 +814,10 @@ class PltubeTests(unittest.TestCase):
                 pltube.verificar_diretorios(args)
                 self.assertEqual(pltube.BASE_DIR, os.path.abspath(temp))
                 self.assertEqual(pltube.SONGS_DIR, os.path.abspath(temp))
-                self.assertEqual(pltube.PLAYLISTS_DIR, os.path.abspath(temp))
+                pasta_playlists = os.path.join(os.path.abspath(temp), "playlists")
+                self.assertEqual(pltube.PLAYLISTS_DIR, pasta_playlists)
+                pltube.criar_diretorios()
+                self.assertTrue(os.path.isdir(pasta_playlists))
             finally:
                 pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR = antigos
 

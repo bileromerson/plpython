@@ -226,6 +226,18 @@ class AplicarMetadadosTests(unittest.TestCase):
         self.assertEqual(saved["result"]["metadata"]["album"], "")
         self.assertEqual(saved["result"]["status"], "RESOLVIDO")
 
+    def test_main_usa_subpasta_playlists_por_padrao(self):
+        with tempfile.TemporaryDirectory() as base:
+            with patch.object(
+                aplicar_metadados,
+                "aplicar_revisoes",
+                return_value={"erros": 0},
+            ) as aplicar:
+                resultado = aplicar_metadados.main(["--BaseDir", base])
+
+        self.assertEqual(resultado, 0)
+        self.assertEqual(aplicar.call_args.args[3], os.path.join(base, "playlists"))
+
 
 if __name__ == "__main__":
     unittest.main()

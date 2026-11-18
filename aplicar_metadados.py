@@ -339,7 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     arquivo_estado = _caminho(base, args.downloads_db)
     arquivo_metadados = _caminho(base, args.metadata_db)
     pasta_musicas = os.path.abspath(args.songs_dir) if args.songs_dir else base
-    pasta_playlists = os.path.abspath(args.playlist_dir) if args.playlist_dir else base
+    pasta_playlists = (
+        os.path.abspath(args.playlist_dir)
+        if args.playlist_dir
+        else os.path.join(base, "playlists")
+    )
     try:
         resultado = aplicar_revisoes(
             arquivo_csv,

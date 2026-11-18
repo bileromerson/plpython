@@ -10,7 +10,7 @@ O README separa os recursos disponíveis dos itens que ainda faltam implementar.
 
 `pltube.py` lê um ou vários CSVs com URLs de vídeos do YouTube, usa o `yt-dlp` para obter as informações disponíveis e baixar o áudio em MP3. O FFmpeg é usado para conversão e para incorporar ao arquivo as tags e a thumbnail recebidas no processamento.
 
-`--BaseDir` aponta somente para a pasta dos CSVs. Se `--SongsDir` e `--PlaylistDir` não forem informados, os MP3s organizados em pastas de artistas e as M3Us ficam nessa mesma pasta. Se forem informados, os caminhos especificados são usados sem acrescentar automaticamente `songs/` ou `playlists/`; caminhos relativos desses dois argumentos são resolvidos a partir do diretório atual.
+`--BaseDir` aponta somente para a pasta dos CSVs. Se `--SongsDir` não for informado, os MP3s organizados em pastas de artistas ficam diretamente nessa pasta. Se `--PlaylistDir` não for informado, as M3Us ficam em `BaseDir/playlists/`. Quando essas opções forem informadas, o caminho especificado é usado sem acrescentar automaticamente `songs/` ou `playlists/`; caminhos relativos são resolvidos a partir do diretório atual.
 
 O downloader cria uma playlist M3U para cada CSV. A coluna da URL pode ser indicada com `--row` (índice começando em zero; o padrão é `2`). A opção `--append` acrescenta itens à M3U existente sem duplicar caminhos já listados.
 
