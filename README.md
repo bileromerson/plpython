@@ -13,6 +13,7 @@ Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts a
 | `download` (`baixar`) | baixa os CSVs e gera as M3Us | `pltube.py` |
 | `update` (`atualizar`) | relê os CSVs, refaz falhas e pendências sem rebaixar o que já existe | `pltube.py --reprocess` |
 | `metadata` (`metadados`) | aplica a planilha `metadados_pendentes.csv` (simula sem `--apply`) | `aplicar_metadados.py` |
+| `review` (`revisar`) | mostra/confirma as faixas do banco SQL no terminal | novo |
 | `spotify` | lista as faixas de uma playlist Spotify | `spotify_playlist_viewer.py` |
 | `revert` (`reverter`) | desfaz o layout legado `songs/_library` | `reverter_biblioteca.py` |
 | `legacy-centralize` | cria o layout legado (não recomendado) | `sincronizar_biblioteca.py` |
@@ -87,7 +88,21 @@ Para identificar melhor quando o YouTube não dá crédito de artista, o título
 | `--review diff` | marca só divergências; dados só do YouTube passam direto |
 | `--no-review` (`--review none`) | não marca nada, segue direto (as notas ficam guardadas no banco) |
 
-Onde conferir: `metadados_pendentes.csv` (agora com a coluna `observacoes`), a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
+**Conferir no terminal** (não precisa de programa de SQL):
+
+```bash
+python plpython.py review                       # faixas OBSERVAR/PENDENTE com o motivo
+python plpython.py review -d                    # + álbum, ISRC, arquivo e link do YouTube
+python plpython.py review --status todas --busca snuffles
+python plpython.py review --ok UG1HUOyL9IA      # está certo: marca como conferida
+python plpython.py review --ok-all              # confirma todas as OBSERVAR
+python plpython.py review --export conferir.csv # abre no Excel/LibreOffice
+python plpython.py review --sql "SELECT title, album FROM music_tracks"   # SQL somente leitura
+```
+
+Rode na mesma pasta onde rodou o download, porque ele lê `./sql/`. Para corrigir título ou artista, use a planilha e o comando `metadata`.
+
+Outros lugares para conferir: `metadados_pendentes.csv` (agora com a coluna `observacoes`), a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
 
 ```sql
 -- sqlite3 csvs/sql/musicas.sqlite3

@@ -4,6 +4,7 @@ Comandos:
   download   baixa áudio dos CSVs do YouTube e gera as M3Us
   update     relê os CSVs, tenta de novo o que falhou e atualiza as M3Us
   metadata   revisa/aplica a planilha metadados_pendentes.csv (simula por padrão)
+  review     mostra/confirma as faixas do banco SQL no terminal
   spotify    mostra as faixas de uma playlist Spotify (somente consulta)
   revert     desfaz o layout legado songs/_library (simula por padrão)
   legacy-centralize  cria o layout legado songs/_library (não recomendado)
@@ -27,6 +28,7 @@ exemplos:
   python plpython.py download -c ./csvs --hybrid --review diff
   python plpython.py metadata            # simula
   python plpython.py metadata --apply    # grava
+  python plpython.py review
   python plpython.py spotify https://open.spotify.com/playlist/ID
   python plpython.py revert -s songs --apply
 """
@@ -148,6 +150,27 @@ def criar_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="grava as mudanças; sem isto só simula")
     _opcoes_bancos(p)
 
+    p = sub.add_parser("review", aliases=["revisar"], formatter_class=fmt,
+                       help="mostra/confirma as faixas do banco SQL direto no terminal",
+                       epilog="exemplos:\n"
+                              "  plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)\n"
+                              "  plpython.py review -d                   # com álbum, arquivo e link do YouTube\n"
+                              "  plpython.py review --status todas --busca snuffles\n"
+                              "  plpython.py review --ok UG1HUOyL9IA njowoGhmw6E\n"
+                              "  plpython.py review --ok-all             # confirma todas as OBSERVAR\n"
+                              "  plpython.py review --export conferir.csv\n"
+                              "  plpython.py review --sql \"SELECT title, album FROM music_tracks\"")
+    p.add_argument("--status", choices=["revisar", "observar", "pendente", "resolvido", "todas"],
+                   default="revisar", help="quais faixas mostrar (padrão: revisar = OBSERVAR + PENDENTE)")
+    p.add_argument("--busca", metavar="TEXTO", help="filtra por título, artista, álbum ou ID do vídeo")
+    p.add_argument("-d", "--detalhes", action="store_true", help="mostra álbum, ISRC, arquivo e link")
+    p.add_argument("--ok", nargs="+", metavar="VIDEO_ID",
+                   help="marca as faixas como conferidas (RESOLVIDO), mantendo título/artista atuais")
+    p.add_argument("--ok-all", action="store_true", help="confirma todas as faixas OBSERVAR de uma vez")
+    p.add_argument("--export", metavar="CSV", help="salva a lista filtrada num CSV para abrir no Excel")
+    p.add_argument("--sql", metavar="SELECT", help="executa uma consulta SQL somente leitura")
+    _opcoes_bancos(p)
+
     p = sub.add_parser("spotify", formatter_class=fmt,
                        help="lista faixas de uma playlist Spotify (somente leitura)",
                        epilog="requer SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET e SPOTIFY_REDIRECT_URI\n"
@@ -180,7 +203,7 @@ def criar_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_ALIASES = {"baixar": "download", "atualizar": "update", "metadados": "metadata", "reverter": "revert"}
+_ALIASES = {"revisar": "review", "baixar": "download", "atualizar": "update", "metadados": "metadata", "reverter": "revert"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -213,6 +236,10 @@ def main(argv: list[str] | None = None) -> int:
         args.base_dir = os.getcwd()
         args.work_dir = args.base_dir
         return aplicar_metadados.executar(args)
+
+    if comando == "review":
+        import revisao
+        return revisao.executar(args)
 
     if comando == "spotify":
         import spotify_playlist_viewer

@@ -1,0 +1,181 @@
+"""Consulta e confirma faixas dos bancos SQLite direto no terminal.
+
+Usado por `plpython.py review`. Não precisa de nenhum programa de SQL instalado.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sqlite3
+import sys
+
+import pltube
+
+STATUS_FILTRO = {
+    "revisar": ("PENDENTE", "OBSERVAR"),
+    "observar": ("OBSERVAR",),
+    "pendente": ("PENDENTE",),
+    "resolvido": ("RESOLVIDO",),
+    "todas": (),
+}
+
+
+def _abrir(args: argparse.Namespace) -> sqlite3.Connection:
+    base = os.getcwd()
+    downloads = args.downloads_db if os.path.isabs(args.downloads_db) else os.path.join(base, args.downloads_db)
+    metadados = args.metadata_db if os.path.isabs(args.metadata_db) else os.path.join(base, args.metadata_db)
+    if not os.path.isfile(metadados):
+        raise FileNotFoundError(
+            f"banco não encontrado: {metadados}\n"
+            "Rode o comando na mesma pasta onde rodou o download, ou use --metadata-db/--downloads-db."
+        )
+    return pltube.abrir_banco_estado(downloads, metadados)
+
+
+def _artistas(texto: str) -> str:
+    try:
+        return ", ".join(json.loads(texto or "[]"))
+    except (TypeError, ValueError):
+        return texto or ""
+
+
+def _linhas(conexao: sqlite3.Connection, status: tuple[str, ...], busca: str) -> list[sqlite3.Row]:
+    where, params = [], []
+    if status:
+        where.append(f"t.metadata_status IN ({','.join('?' * len(status))})")
+        params += list(status)
+    if busca:
+        where.append("(t.title LIKE ? OR t.artists_json LIKE ? OR t.album LIKE ? OR t.video_id = ?)")
+        params += [f"%{busca}%"] * 3 + [busca]
+    sql = (
+        "SELECT t.video_key, t.video_id, t.title, t.artists_json, t.album, t.isrc, "
+        "t.metadata_status, t.review_note, r.audio_path "
+        "FROM music.music_tracks t LEFT JOIN music.metadata_resolution r ON r.video_key = t.video_key"
+        + (" WHERE " + " AND ".join(where) if where else "")
+        + " ORDER BY t.metadata_status, t.artists_json, t.title"
+    )
+    return conexao.execute(sql, params).fetchall()
+
+
+def listar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
+    linhas = _linhas(conexao, STATUS_FILTRO[args.status], args.busca or "")
+    if not linhas:
+        print("Nenhuma faixa encontrada com esse filtro.")
+        return 0
+    for linha in linhas:
+        print(f"[{linha['metadata_status']}] {linha['video_id']}  "
+              f"{_artistas(linha['artists_json']) or '?'} — {linha['title'] or '?'}")
+        if args.detalhes:
+            if linha["album"]:
+                print(f"    álbum: {linha['album']}")
+            if linha["isrc"]:
+                print(f"    ISRC: {linha['isrc']}")
+            if linha["audio_path"]:
+                print(f"    arquivo: {pltube._resolver_caminho_banco(linha['audio_path'], conexao)}")
+            print(f"    https://youtu.be/{linha['video_id']}")
+        if linha["review_note"]:
+            for nota in linha["review_note"].split(" | "):
+                print(f"    • {nota}")
+    contagem = conexao.execute(
+        "SELECT metadata_status, COUNT(*) FROM music.music_tracks GROUP BY metadata_status"
+    ).fetchall()
+    print("\nTotal: " + ", ".join(f"{s}={n}" for s, n in contagem))
+    if args.status in ("revisar", "observar", "pendente"):
+        print("Se estiver certo: plpython.py review --ok VIDEO_ID [VIDEO_ID ...]  (ou --ok-all)")
+    return 0
+
+
+def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool) -> int:
+    if todos_observar:
+        ids = [r[0] for r in conexao.execute(
+            "SELECT video_id FROM music.metadata_resolution WHERE status = 'OBSERVAR'"
+        ).fetchall()]
+    erros = 0
+    for video_id in ids:
+        linha = conexao.execute(
+            "SELECT video_key FROM music.metadata_resolution WHERE video_id = ? OR video_key = ?",
+            (video_id, video_id),
+        ).fetchone()
+        salvo = pltube.carregar_resolucao(conexao, linha["video_key"]) if linha else None
+        if not salvo:
+            print(f"Não encontrado: {video_id}")
+            erros += 1
+            continue
+        resultado = salvo["result"]
+        metadata = resultado.get("metadata") or {}
+        if not metadata.get("title") or not metadata.get("artists"):
+            print(f"{video_id}: sem título/artista; corrija pela planilha (plpython.py metadata).")
+            erros += 1
+            continue
+        resultado["status"] = "RESOLVIDO"
+        resultado["pending_reasons"] = []
+        resultado["observations"] = []
+        resultado["manual_review"] = {"fields": [], "confirmed": True, "via": "review --ok"}
+        for campo in ("title", "artists"):
+            (resultado.setdefault("confidence", {}))[campo] = "confirmada_manual"
+        pltube.salvar_resolucao(conexao, linha["video_key"], resultado, salvo.get("audio_path") or "")
+        caminho = salvo.get("audio_path") or ""
+        if caminho and os.path.isfile(caminho):
+            pltube.aplicar_tags_hibridas(caminho, resultado)
+            atalho = os.path.join(os.path.dirname(os.path.dirname(caminho)), "_observar", os.path.basename(caminho))
+            if os.path.islink(atalho):
+                os.unlink(atalho)
+        print(f"Confirmado: {_artistas(json.dumps(metadata.get('artists')))} — {metadata.get('title')}")
+    return 1 if erros else 0
+
+
+def consulta_sql(conexao: sqlite3.Connection, sql: str) -> int:
+    """Executa um SELECT somente leitura e imprime o resultado."""
+    conexao.execute("PRAGMA query_only = ON")
+    try:
+        cursor = conexao.execute(sql)
+    except sqlite3.Error as exc:
+        print(f"Erro no SQL: {exc}")
+        print("Tabelas: music.music_tracks, music.metadata_resolution, download_jobs, video_cache, playlist_items")
+        return 1
+    colunas = [c[0] for c in cursor.description or []]
+    linhas = cursor.fetchall()
+    if colunas:
+        print(" | ".join(colunas))
+        print("-" * min(120, len(" | ".join(colunas))))
+    for linha in linhas:
+        print(" | ".join("" if v is None else str(v) for v in linha))
+    print(f"({len(linhas)} linha(s))")
+    return 0
+
+
+def exportar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
+    linhas = _linhas(conexao, STATUS_FILTRO[args.status], args.busca or "")
+    with open(args.export, "w", encoding="utf-8-sig", newline="") as arquivo:
+        writer = csv.writer(arquivo)
+        writer.writerow(["status", "video_id", "artistas", "titulo", "album", "isrc", "observacoes", "arquivo", "youtube"])
+        for l in linhas:
+            writer.writerow([
+                l["metadata_status"], l["video_id"], _artistas(l["artists_json"]), l["title"],
+                l["album"], l["isrc"], l["review_note"],
+                pltube._resolver_caminho_banco(l["audio_path"] or "", conexao),
+                f"https://youtu.be/{l['video_id']}",
+            ])
+    print(f"{len(linhas)} faixa(s) exportada(s) para {args.export} (abre no Excel/LibreOffice)")
+    return 0
+
+
+def executar(args: argparse.Namespace) -> int:
+    try:
+        conexao = _abrir(args)
+    except (FileNotFoundError, sqlite3.Error, OSError) as exc:
+        print(f"Erro: {exc}", file=sys.stderr)
+        return 1
+    try:
+        if args.sql:
+            return consulta_sql(conexao, args.sql)
+        if args.ok or args.ok_all:
+            return confirmar(conexao, args.ok or [], args.ok_all)
+        if args.export:
+            return exportar(conexao, args)
+        return listar(conexao, args)
+    finally:
+        conexao.close()
