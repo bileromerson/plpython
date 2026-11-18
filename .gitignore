@@ -215,10 +215,18 @@ pltube_state.sqlite3-wal
 pltube_state.sqlite3-shm
 metadados_pendentes.csv
 .metadados-pendentes-*.csv
+<<<<<<< HEAD
 
 # Cookies da conta do Google (dão acesso à conta; nunca enviar ao Git)
 cookies*.txt
 *cookies*.txt
+=======
+*.csv
+*.mp3
+songs/
+playlists/
+csvs/*
+>>>>>>> b94d756 (gitignore)
 
 # Arquivos gerados pelo plpython na pasta de execução (biblioteca, bancos, logs)
 songs/
