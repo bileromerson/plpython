@@ -318,7 +318,10 @@ def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Revisa e aplica metadados selecionados em MP3s; simula por padrão"
     )
-    parser.add_argument("-b", "--BaseDir", dest="base_dir", default=os.getcwd())
+    parser.add_argument(
+        "-b", "--BaseDir", dest="base_dir",
+        help="(ignorado) a planilha, sql/ e songs/ são lidos da pasta de execução",
+    )
     parser.add_argument("--arquivo", default="metadados_pendentes.csv", help="CSV editado pelo usuário")
     parser.add_argument("-s", "--SongsDir", dest="songs_dir")
     parser.add_argument("-p", "--PlaylistDir", dest="playlist_dir")
@@ -339,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def executar(args: argparse.Namespace) -> int:
     """Executa o aplicador a partir de argumentos já interpretados (usado por plpython.py)."""
-    base = os.path.abspath(args.base_dir)
+    # A pasta base só serve para ler CSVs no download; aqui tudo vem da pasta atual.
+    if getattr(args, "base_dir", None) and os.path.abspath(args.base_dir) != os.getcwd():
+        print("Aviso: --BaseDir é ignorado aqui; usando a pasta atual para planilha, sql/ e songs/.")
+    base = os.getcwd()
     arquivo_csv = _caminho(base, args.arquivo)
     arquivo_estado = _caminho(base, args.downloads_db)
     arquivo_metadados = _caminho(base, args.metadata_db)

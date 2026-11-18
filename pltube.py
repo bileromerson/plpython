@@ -24,11 +24,11 @@ except ImportError:  # Mantém helpers e testes importáveis sem a dependência 
     yt_dlp = None
 
 
-BASE_DIR = os.getcwd()  # pasta dos CSVs
-WORK_DIR = BASE_DIR  # onde ficam sql/, Logs.txt e a planilha
-SONGS_DIR = BASE_DIR
-PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
-LOG_FILE = os.path.join(BASE_DIR, "Logs.txt")
+BASE_DIR = os.getcwd()  # usada SOMENTE para ler os CSVs
+WORK_DIR = os.getcwd()  # pasta de execução: songs/, playlists/, sql/, Logs.txt e planilha
+SONGS_DIR = os.path.join(WORK_DIR, "songs")
+PLAYLISTS_DIR = os.path.join(WORK_DIR, "playlists")
+LOG_FILE = os.path.join(WORK_DIR, "Logs.txt")
 ROW = 2
 ARTIST_LINKS = False
 ESPERAR_BLOQUEIO = False
@@ -303,7 +303,7 @@ def _diretorio_banco(conexao: sqlite3.Connection, schema: str = "main") -> str:
     """Retorna a pasta do arquivo SQLite; em memória, usa a pasta dos CSVs."""
     databases = {row[1]: row[2] for row in conexao.execute("PRAGMA database_list")}
     arquivo = databases.get(schema, "")
-    return os.path.dirname(os.path.abspath(arquivo)) if arquivo else BASE_DIR
+    return os.path.dirname(os.path.abspath(arquivo)) if arquivo else WORK_DIR
 
 
 def _caminho_relativo_banco(path: str, conexao: sqlite3.Connection) -> str:
@@ -1655,7 +1655,9 @@ def executar(args: argparse.Namespace) -> int:
         metadata_path = os.path.join(WORK_DIR, metadata_path)
     legacy_path = args.legacy_state_file
     if legacy_path and not os.path.isabs(legacy_path):
-        legacy_path = os.path.join(WORK_DIR, legacy_path)
+        # O banco antigo costumava ficar junto dos CSVs; procura nos dois lugares.
+        candidatos = [os.path.join(WORK_DIR, legacy_path), os.path.join(BASE_DIR, legacy_path)]
+        legacy_path = next((c for c in candidatos if os.path.isfile(c)), candidatos[0])
     try:
         estado = abrir_banco_estado(state_path, metadata_path)
         migracao = migrar_banco_legado(estado, legacy_path) if legacy_path else {}
