@@ -4,6 +4,68 @@ Ferramentas em Python para organizar playlists a partir de URLs do YouTube, baix
 
 O README separa os recursos disponíveis dos itens que ainda faltam implementar.
 
+## Comando unificado: `plpython.py`
+
+Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts antigos continuam funcionando como antes.
+
+| Comando | Faz | Antes era |
+|---|---|---|
+| `download` (`baixar`) | baixa os CSVs e gera as M3Us | `pltube.py` |
+| `update` (`atualizar`) | relê os CSVs, refaz falhas e pendências sem rebaixar o que já existe | `pltube.py --reprocess` |
+| `metadata` (`metadados`) | aplica a planilha `metadados_pendentes.csv` (simula sem `--apply`) | `aplicar_metadados.py` |
+| `spotify` | lista as faixas de uma playlist Spotify | `spotify_playlist_viewer.py` |
+| `revert` (`reverter`) | desfaz o layout legado `songs/_library` | `reverter_biblioteca.py` |
+| `legacy-centralize` | cria o layout legado (não recomendado) | `sincronizar_biblioteca.py` |
+
+Opções renomeadas (os nomes antigos ainda são aceitos, mas não aparecem na ajuda):
+
+| Novo | Antigo | Motivo |
+|---|---|---|
+| `-b/--base-dir`, `-s/--songs-dir`, `-p/--playlist-dir`, `-l/--log-file` | `--BaseDir`, `--SongsDir`, `--PlaylistDir`, `--LogFile` | padronizar em minúsculas com hífen |
+| CSVs posicionais: `download a.csv b.csv` | `--lista a.csv` | aceita vários CSVs |
+| `-c/--url-column` | `--row` | nome descreve o que é |
+| `--retry` (já embutido em `update`) | `--reprocess` | mais claro |
+| `--wait-on-limit` | `--esperar-bloqueio` | tinha dois nomes |
+| `--hybrid` | `--modelo-hibrido` | curto |
+| `--require-isrc`, `--require-mb-artist` | `--exigir-isrc`, `--exigir-artista-musicbrainz` | agora ativam `--hybrid` sozinhos; antes eram ignorados sem ele |
+| `--downloads-db` | `--state-file` | um só nome em todos os comandos |
+| `--legacy-db` | `--legacy-state-file` | movido para opções avançadas |
+| `--sheet` | `--arquivo` | consistência |
+| `revert/legacy-centralize -s/--songs-dir` | `--root` | mesmo nome do download |
+
+Exemplos:
+
+```bash
+python plpython.py -h                     # lista os comandos
+python plpython.py download -h            # opções de um comando
+
+# Baixar todos os CSVs da pasta; músicas e M3Us em pastas próprias
+python plpython.py download -b ./csvs -s /media/Musicas -p ./m3u
+
+# Só duas playlists, linkando colaboradores e acrescentando às M3Us
+python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links --append
+
+# CSV cuja URL está na última coluna
+python plpython.py download minha.csv -c -1
+
+# Conferir no MusicBrainz exigindo ISRC (ativa --hybrid automaticamente)
+python plpython.py download -b ./csvs --require-isrc
+
+# Atualizar depois de editar CSVs ou após falhas, esperando se o YouTube bloquear
+python plpython.py update -b ./csvs --wait-on-limit
+
+# Revisar metadados: simular e depois gravar
+python plpython.py metadata -b ./csvs
+python plpython.py metadata -b ./csvs --apply
+
+# Spotify (precisa das variáveis SPOTIFY_*)
+python plpython.py spotify "https://open.spotify.com/playlist/ID"
+
+# Desfazer songs/_library
+python plpython.py revert -s songs            # simula
+python plpython.py revert -s songs --apply
+```
+
 ## O que já funciona
 
 ### Downloader do YouTube
@@ -116,10 +178,9 @@ A lista abaixo contém apenas itens ainda não disponíveis.
 - [ ] **Capa do lançamento:** baixar a imagem frontal confirmada do Cover Art Archive, incorporá-la ao MP3 e preservar uma única arte escolhida; por enquanto a URL é apenas uma sugestão.
 - [ ] **Catálogo global da biblioteca:** indexar todos os arquivos locais, seus caminhos, fontes, tags e relações com playlists; permitir filtros como `unknown` e `*` para localizar pendências ou revisar o catálogo completo.
 - [ ] **Backup portátil de metadados:** criar e restaurar um catálogo SQLite com URLs, metadados e referências dos arquivos, sem exigir que os MP3s estejam conectados para consultar o catálogo. Esse backup não conterá o áudio.
-- [ ] **Comando unificado:** oferecer uma única entrada com subcomandos, por exemplo `pltube download`, `pltube migrate`, `pltube spotify`, `pltube catalog` e `pltube metadata`, encaminhando cada um para a função correspondente sem alterar sua lógica.
 - [ ] **Transferência Spotify → YouTube:** pesquisar correspondências de faixas e gerar uma lista para revisão. O visualizador atual não faz essa conversão.
 
-A descrição do modelo híbrido está em [MODELO_HIBRIDO_METADADOS.md](MODELO_HIBRIDO_METADADOS.md). As propostas de catálogo/backup e da interface unificada ainda não fazem parte da implementação do repositório.
+A descrição do modelo híbrido está em [MODELO_HIBRIDO_METADADOS.md](MODELO_HIBRIDO_METADADOS.md). As propostas de catálogo/backup ainda não fazem parte da implementação do repositório.
 
 ## Requisitos e testes
 

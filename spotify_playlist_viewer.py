@@ -153,8 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Consulta e exibe faixas de uma playlist Spotify; não baixa áudio."
     )
     parser.add_argument("playlist", help="URL, URI ou ID da playlist Spotify")
-    args = parser.parse_args(argv)
+    return executar(parser.parse_args(argv))
 
+
+def executar(args: argparse.Namespace) -> int:
+    """Consulta a playlist a partir de argumentos já interpretados."""
     try:
         playlist_id = extrair_playlist_id(args.playlist)
         mostrar_playlist(playlist_id)

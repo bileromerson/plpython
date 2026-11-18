@@ -1591,16 +1591,19 @@ def criar_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    return executar(criar_parser().parse_args(argv))
+
+
+def executar(args: argparse.Namespace) -> int:
+    """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
     global MUSICBRAINZ_CLIENT, RESOLVER_CACHE
-    parser = criar_parser()
-    args = parser.parse_args(argv)
     verificar_diretorios(args)
     MUSICBRAINZ_CLIENT = MusicBrainzClient() if MODELO_HIBRIDO else None
     RESOLVER_CACHE = {}
     criar_diretorios()
 
     if args.lista:
-        csvs = [args.lista]
+        csvs = [args.lista] if isinstance(args.lista, str) else list(args.lista)
     else:
         csvs = obter_csvs()
 

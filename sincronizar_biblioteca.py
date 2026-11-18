@@ -277,7 +277,11 @@ def main(argv: list[str] | None = None) -> int:
         "--apply", action="store_true",
         help="Executa a migração. Sem esta opção, só exibe uma simulação.",
     )
-    args = parser.parse_args(argv)
+    return executar(parser.parse_args(argv))
+
+
+def executar(args: argparse.Namespace) -> int:
+    """Executa a centralização legada a partir de argumentos já interpretados."""
     try:
         sincronizar(args.root, aplicar=args.apply)
     except ValueError as exc:

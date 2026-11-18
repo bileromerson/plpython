@@ -333,7 +333,11 @@ def criar_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = criar_parser().parse_args(argv)
+    return executar(criar_parser().parse_args(argv))
+
+
+def executar(args: argparse.Namespace) -> int:
+    """Executa o aplicador a partir de argumentos já interpretados (usado por plpython.py)."""
     base = os.path.abspath(args.base_dir)
     arquivo_csv = _caminho(base, args.arquivo)
     arquivo_estado = _caminho(base, args.downloads_db)

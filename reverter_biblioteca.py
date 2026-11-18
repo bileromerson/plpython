@@ -577,7 +577,11 @@ def main(argv: list[str] | None = None) -> int:
         "--apply", action="store_true",
         help="Aplica movimentos/links e atualiza M3Us; sem esta opção, só simula.",
     )
-    args = parser.parse_args(argv)
+    return executar(parser.parse_args(argv))
+
+
+def executar(args: argparse.Namespace) -> int:
+    """Executa a reversão a partir de argumentos já interpretados."""
     try:
         reverter(
             args.root,
