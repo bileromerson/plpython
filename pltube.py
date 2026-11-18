@@ -14,7 +14,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from resolvedor_metadados import MusicBrainzClient, resolver_metadados
+from resolvedor_metadados import MusicBrainzClient, normalize_isrc, resolver_metadados
 
 try:
     import yt_dlp
@@ -23,13 +23,15 @@ except ImportError:  # Mantém helpers e testes importáveis sem a dependência 
 
 
 BASE_DIR = os.getcwd()
-SONGS_DIR = os.path.join(BASE_DIR, "songs")
-PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
+SONGS_DIR = BASE_DIR
+PLAYLISTS_DIR = BASE_DIR
 LOG_FILE = os.path.join(BASE_DIR, "Logs.txt")
 ROW = 2
 ARTIST_LINKS = False
 ESPERAR_BLOQUEIO = False
 MODELO_HIBRIDO = False
+EXIGIR_ISRC = False
+EXIGIR_ARTISTA_MUSICBRAINZ = False
 MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
 RESOLVER_CACHE: dict[str, Any] = {}
 MAX_TENTATIVAS_BLOQUEIO = 6
@@ -38,20 +40,21 @@ ESPERA_MAXIMA_SEGUNDOS = 600
 
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
-    """Aplica as opções de diretório e de coluna informadas na linha de comando."""
+    """BaseDir aponta para CSVs; diretórios de saída têm caminhos independentes."""
     global BASE_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
-    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO
+    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC
+    global EXIGIR_ARTISTA_MUSICBRAINZ
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
-    SONGS_DIR = os.path.normpath(os.path.join(BASE_DIR, args.songs_dir or "songs"))
-    PLAYLISTS_DIR = os.path.normpath(
-        os.path.join(BASE_DIR, args.playlist_dir or "playlists")
-    )
-    LOG_FILE = os.path.normpath(os.path.join(BASE_DIR, args.log_file or "Logs.txt"))
+    SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else BASE_DIR
+    PLAYLISTS_DIR = os.path.abspath(args.playlist_dir) if args.playlist_dir else BASE_DIR
+    LOG_FILE = os.path.abspath(args.log_file) if args.log_file else os.path.join(BASE_DIR, "Logs.txt")
     ROW = args.row
     ARTIST_LINKS = args.artist_links
     ESPERAR_BLOQUEIO = args.esperar_bloqueio
     MODELO_HIBRIDO = args.modelo_hibrido
+    EXIGIR_ISRC = args.exigir_isrc
+    EXIGIR_ARTISTA_MUSICBRAINZ = args.exigir_artista_musicbrainz
 
 
 def registrar_erro(url: str, motivo: str, playlist: str = "") -> None:
@@ -210,17 +213,48 @@ def metadados_de_arquivo_local(path: str, video_id: str, title_hint: str = "") -
     """Obtém tags locais se disponíveis; não consulta YouTube."""
     title = title_hint.strip() if title_hint else ""
     artistas: list[str] = []
+    album = ""
+    isrc = ""
+    duration = 0.0
     try:
         from mutagen import File as MutagenFile
 
         audio = MutagenFile(path, easy=True)
         if audio:
             tags = audio.get("title", [])
-            if tags and not title:
+            if tags:
                 title = str(tags[0] if isinstance(tags, list) else tags)
             artistas = normalizar_artistas({"artists": audio.get("artist", [])})
+            albums = audio.get("album", [])
+            if albums:
+                album = str(albums[0] if isinstance(albums, list) else albums).strip()
+            duration = float(getattr(getattr(audio, "info", None), "length", 0) or 0)
+            for key in ("isrc", "tsrc"):
+                values = audio.get(key, [])
+                if not isinstance(values, (list, tuple)):
+                    values = [values]
+                isrc = next((normalized for value in values
+                             if (normalized := normalize_isrc(str(value)))), "")
+                if isrc:
+                    break
     except Exception:
         pass
+    if not isrc:
+        # TSRC é o frame ID3 padrão para International Standard Recording Code.
+        try:
+            from mutagen.id3 import ID3
+
+            tags_id3 = ID3(path)
+            for frame in tags_id3.getall("TSRC"):
+                values = getattr(frame, "text", [])
+                if not isinstance(values, (list, tuple)):
+                    values = [values]
+                isrc = next((normalized for value in values
+                             if (normalized := normalize_isrc(str(value)))), "")
+                if isrc:
+                    break
+        except Exception:
+            pass
     if not title:
         stem = os.path.splitext(os.path.basename(path))[0]
         title = re.sub(rf" \[{re.escape(video_id)}\]$", "", stem)
@@ -231,14 +265,69 @@ def metadados_de_arquivo_local(path: str, video_id: str, title_hint: str = "") -
             artistas = [nome_pasta]
         else:
             artistas = ["Artista Desconhecido"]
-    return {"title": title, "artists": artistas, "artist": artistas[0], "duration": 0, "id": video_id}
+    local_metadata = {
+        "title": title,
+        "artists": list(artistas),
+        "album": album,
+        "isrc": isrc,
+    }
+    return {
+        "title": title,
+        "artists": artistas,
+        "artist": artistas[0],
+        "album": album,
+        "isrc": isrc,
+        "duration": duration,
+        "id": video_id,
+        "local_metadata": local_metadata,
+    }
 
 
-def abrir_banco_estado(path: str) -> sqlite3.Connection:
-    pasta = os.path.dirname(os.path.abspath(path))
+def _diretorio_banco(conexao: sqlite3.Connection, schema: str = "main") -> str:
+    """Retorna a pasta do arquivo SQLite; em memória, usa a pasta dos CSVs."""
+    databases = {row[1]: row[2] for row in conexao.execute("PRAGMA database_list")}
+    arquivo = databases.get(schema, "")
+    return os.path.dirname(os.path.abspath(arquivo)) if arquivo else BASE_DIR
+
+
+def _caminho_relativo_banco(path: str, conexao: sqlite3.Connection) -> str:
+    if not path:
+        return ""
+    return os.path.relpath(os.path.abspath(path), start=_diretorio_banco(conexao))
+
+
+def _resolver_caminho_banco(path: str, conexao: sqlite3.Connection) -> str:
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.abspath(os.path.join(_diretorio_banco(conexao), path))
+
+
+def _chave_csv(csv_path: str) -> str:
+    """Guarda CSVs relativamente à pasta base para manter o estado portável."""
+    absoluto = csv_path if os.path.isabs(csv_path) else os.path.join(BASE_DIR, csv_path)
+    return os.path.normpath(os.path.relpath(os.path.abspath(absoluto), start=BASE_DIR))
+
+
+def abrir_banco_estado(
+    path: str, metadata_path: str | None = None
+) -> sqlite3.Connection:
+    """Abre o banco de downloads e anexa um segundo arquivo só para metadados."""
+    downloads_path = os.path.abspath(path)
+    pasta = os.path.dirname(downloads_path)
     os.makedirs(pasta, exist_ok=True)
-    conexao = sqlite3.connect(path, timeout=30)
+    metadata_path = os.path.abspath(
+        metadata_path or os.path.join(pasta, "musicas.sqlite3")
+    )
+    if os.path.normcase(os.path.realpath(downloads_path)) == os.path.normcase(
+        os.path.realpath(metadata_path)
+    ):
+        raise ValueError("downloads.sqlite3 e musicas.sqlite3 precisam ser arquivos diferentes")
+    os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+    conexao = sqlite3.connect(downloads_path, timeout=30)
     conexao.row_factory = sqlite3.Row
+    conexao.execute("ATTACH DATABASE ? AS music", (metadata_path,))
     conexao.executescript(
         """
         CREATE TABLE IF NOT EXISTS video_cache (
@@ -251,6 +340,17 @@ def abrir_banco_estado(path: str) -> sqlite3.Connection:
             duration REAL NOT NULL DEFAULT 0,
             path TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS download_jobs (
+            video_key TEXT PRIMARY KEY,
+            video_id TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDENTE',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            audio_path TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS csv_progress (
             csv_path TEXT PRIMARY KEY,
@@ -269,7 +369,11 @@ def abrir_banco_estado(path: str) -> sqlite3.Connection:
             path TEXT NOT NULL,
             PRIMARY KEY (csv_path, row_index)
         );
-        CREATE TABLE IF NOT EXISTS metadata_resolution (
+        CREATE TABLE IF NOT EXISTS migration_log (
+            source_path TEXT PRIMARY KEY,
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS music.metadata_resolution (
             video_key TEXT PRIMARY KEY,
             video_id TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL,
@@ -277,10 +381,152 @@ def abrir_banco_estado(path: str) -> sqlite3.Connection:
             audio_path TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS music.music_tracks (
+            video_key TEXT PRIMARY KEY,
+            video_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            artists_json TEXT NOT NULL DEFAULT '[]',
+            album TEXT NOT NULL DEFAULT '',
+            isrc TEXT NOT NULL DEFAULT '',
+            duration REAL NOT NULL DEFAULT 0,
+            thumbnail_url TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            metadata_status TEXT NOT NULL DEFAULT 'PROVISORIO',
+            source_youtube_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            confidence_json TEXT NOT NULL DEFAULT '{}',
+            diagnostics_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
+    )
+    # Compatibilidade de leitura com chamadas antigas e ferramentas locais.
+    conexao.execute(
+        "CREATE TEMP VIEW IF NOT EXISTS metadata_resolution AS "
+        "SELECT * FROM music.metadata_resolution"
     )
     conexao.commit()
     return conexao
+
+
+def migrar_banco_legado(
+    conexao: sqlite3.Connection, legacy_path: str
+) -> dict[str, int]:
+    """Copia o banco antigo único para os dois bancos novos, sem remover o original."""
+    legacy_path = os.path.abspath(legacy_path)
+    if not os.path.isfile(legacy_path):
+        return {"downloads": 0, "playlists": 0, "metadados": 0}
+    bancos_abertos = {
+        row[2] for row in conexao.execute("PRAGMA database_list") if row[2]
+    }
+    if legacy_path in bancos_abertos:
+        return {"downloads": 0, "playlists": 0, "metadados": 0}
+    chave_migracao = _chave_csv(legacy_path)
+    if conexao.execute(
+        "SELECT 1 FROM migration_log WHERE source_path = ?", (chave_migracao,)
+    ).fetchone():
+        return {"downloads": 0, "playlists": 0, "metadados": 0}
+
+    antigo = sqlite3.connect(f"file:{legacy_path}?mode=ro", uri=True, timeout=30)
+    antigo.row_factory = sqlite3.Row
+    try:
+        tabelas = {
+            row[0] for row in antigo.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not (tabelas & {"video_cache", "csv_progress", "playlist_items", "metadata_resolution"}):
+            return {"downloads": 0, "playlists": 0, "metadados": 0}
+
+        migrated = {"downloads": 0, "playlists": 0, "metadados": 0}
+        if "video_cache" in tabelas:
+            for row in antigo.execute("SELECT * FROM video_cache"):
+                data = dict(row)
+                try:
+                    artists = json.loads(data.get("artists_json") or "[]")
+                except json.JSONDecodeError:
+                    artists = []
+                meta = {
+                    "id": data.get("video_id") or "",
+                    "title": data.get("title") or "",
+                    "artists": artists if isinstance(artists, list) else [],
+                    "duration": data.get("duration") or 0,
+                }
+                salvar_video_cache(
+                    conexao, data["video_key"], data.get("source_url") or "",
+                    data.get("status") or "metadata", meta,
+                    _resolver_caminho_banco(data.get("path") or "", antigo)
+                    if data.get("path") else "",
+                    data.get("error") or "",
+                )
+                _salvar_metadados_musica(conexao, data["video_key"], meta)
+                status_map = {
+                    "complete": "CONCLUIDO", "failed": "ERRO", "metadata": "METADADOS"
+                }
+                registrar_job_download(
+                    conexao, data["video_key"], data.get("source_url") or "",
+                    status_map.get(data.get("status"), "PENDENTE"),
+                    video_id=data.get("video_id") or "",
+                    path=_resolver_caminho_banco(data.get("path") or "", antigo)
+                    if data.get("path") else "",
+                    error=data.get("error") or "",
+                )
+                migrated["downloads"] += 1
+
+        if "csv_progress" in tabelas:
+            for row in antigo.execute("SELECT * FROM csv_progress"):
+                data = dict(row)
+                conexao.execute(
+                    """INSERT OR IGNORE INTO csv_progress
+                    (csv_path, signature, next_row, complete, total_rows)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        _chave_csv(data["csv_path"]), data.get("signature") or "",
+                        int(data.get("next_row") or 0), int(data.get("complete") or 0),
+                        int(data.get("total_rows") or 0),
+                    ),
+                )
+
+        if "playlist_items" in tabelas:
+            for row in antigo.execute("SELECT * FROM playlist_items"):
+                data = dict(row)
+                conexao.execute(
+                    """INSERT OR IGNORE INTO playlist_items
+                    (csv_path, row_index, video_key, title, artist, duration, path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        _chave_csv(data["csv_path"]), int(data["row_index"]),
+                        data["video_key"], data.get("title") or "",
+                        data.get("artist") or "", float(data.get("duration") or 0),
+                        _caminho_relativo_banco(
+                            _resolver_caminho_banco(data.get("path") or "", antigo), conexao
+                        ) if data.get("path") else "",
+                    ),
+                )
+                migrated["playlists"] += 1
+
+        if "metadata_resolution" in tabelas:
+            for row in antigo.execute("SELECT * FROM metadata_resolution"):
+                data = dict(row)
+                try:
+                    resultado = json.loads(data.get("result_json") or "{}")
+                except json.JSONDecodeError:
+                    resultado = {}
+                caminho_antigo = data.get("audio_path") or ""
+                audio_path = _resolver_caminho_banco(caminho_antigo, antigo) if caminho_antigo else ""
+                salvar_resolucao(
+                    conexao, data["video_key"], resultado, audio_path
+                )
+                migrated["metadados"] += 1
+
+        conexao.execute(
+            "INSERT INTO migration_log (source_path) VALUES (?)", (chave_migracao,)
+        )
+        conexao.commit()
+        return migrated
+    finally:
+        antigo.close()
 
 
 def ler_video_cache(conexao: sqlite3.Connection, video_key: str) -> dict[str, Any] | None:
@@ -289,7 +535,36 @@ def ler_video_cache(conexao: sqlite3.Connection, video_key: str) -> dict[str, An
         return None
     registro = dict(linha)
     registro["artists"] = json.loads(registro.pop("artists_json") or "[]")
+    registro["path"] = _resolver_caminho_banco(registro.get("path") or "", conexao)
     return registro
+
+
+def registrar_job_download(
+    conexao: sqlite3.Connection,
+    video_key: str,
+    url: str,
+    status: str,
+    *,
+    video_id: str = "",
+    path: str = "",
+    error: str = "",
+) -> None:
+    """Atualiza o acompanhamento da fila sem guardar caminhos absolutos."""
+    conexao.execute(
+        """INSERT INTO download_jobs
+        (video_key, video_id, source_url, status, attempts, audio_path, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_key) DO UPDATE SET
+        video_id=CASE WHEN excluded.video_id != '' THEN excluded.video_id ELSE download_jobs.video_id END,
+        source_url=excluded.source_url, status=excluded.status,
+        attempts=download_jobs.attempts + CASE WHEN excluded.status = 'BAIXANDO' THEN 1 ELSE 0 END,
+        audio_path=CASE WHEN excluded.audio_path != '' THEN excluded.audio_path ELSE download_jobs.audio_path END,
+        error=excluded.error, updated_at=CURRENT_TIMESTAMP""",
+        (
+            video_key, video_id, url, status, 1 if status == "BAIXANDO" else 0,
+            _caminho_relativo_banco(path, conexao), error,
+        ),
+    )
 
 
 def salvar_video_cache(
@@ -313,7 +588,7 @@ def salvar_video_cache(
         (
             video_key, str(meta.get("id") or ""), url, status,
             str(meta.get("title") or ""), json.dumps(meta.get("artists") or [], ensure_ascii=False),
-            float(meta.get("duration") or 0), path, error,
+            float(meta.get("duration") or 0), _caminho_relativo_banco(path, conexao), error,
         ),
     )
 
@@ -331,8 +606,8 @@ def salvar_item_playlist(
         (csv_path, row_index, video_key, title, artist, duration, path)
         VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
-            csv_path, row_index, video_key, meta["title"], ", ".join(meta["artists"]),
-            float(meta.get("duration") or 0), os.path.abspath(path),
+            _chave_csv(csv_path), row_index, video_key, meta["title"], ", ".join(meta["artists"]),
+            float(meta.get("duration") or 0), _caminho_relativo_banco(path, conexao),
         ),
     )
 
@@ -342,14 +617,17 @@ def listar_itens_playlist(conexao: sqlite3.Connection, csv_path: str):
         "SELECT title, artist, duration, path FROM playlist_items WHERE csv_path = ? ORDER BY row_index",
         (csv_path,),
     ).fetchall()
-    return [(row["title"], row["artist"], row["duration"], row["path"]) for row in rows]
+    return [
+        (row["title"], row["artist"], row["duration"], _resolver_caminho_banco(row["path"], conexao))
+        for row in rows
+    ]
 
 
 def carregar_resolucao(
     conexao: sqlite3.Connection, video_key: str
 ) -> dict[str, Any] | None:
     linha = conexao.execute(
-        "SELECT result_json, audio_path FROM metadata_resolution WHERE video_key = ?",
+        "SELECT result_json, audio_path FROM music.metadata_resolution WHERE video_key = ?",
         (video_key,),
     ).fetchone()
     if not linha:
@@ -357,10 +635,69 @@ def carregar_resolucao(
     try:
         return {
             "result": json.loads(linha["result_json"]),
-            "audio_path": linha["audio_path"],
+            "audio_path": _resolver_caminho_banco(linha["audio_path"], conexao),
         }
     except (TypeError, json.JSONDecodeError):
         return None
+
+
+def _salvar_metadados_musica(
+    conexao: sqlite3.Connection, video_key: str, dados: dict[str, Any]
+) -> None:
+    """Mantém uma linha estruturada por faixa no banco dedicado de músicas."""
+    resultado_hibrido = isinstance(dados.get("metadata"), dict)
+    metadata = dados.get("metadata") if resultado_hibrido else dados
+    metadata = metadata or {}
+    origem = dados.get("source_youtube") or (dados if not resultado_hibrido else {})
+    provenance = dados.get("provenance") or {
+        campo: "youtube" for campo in ("title", "artists", "album", "isrc", "thumbnail_url")
+        if metadata.get(campo)
+    }
+    confidence = dados.get("confidence") or {
+        campo: "provisoria" for campo in provenance
+    }
+    diagnostics_by_source = dados.get("diagnostics_by_source") or {}
+    artists = metadata.get("artists") or []
+    if isinstance(artists, str):
+        artists = [artists]
+    artists = [str(item).strip() for item in artists if str(item).strip()]
+    track_status = str(dados.get("status") or metadata.get("hybrid_status") or "NAO_VALIDADO")
+    values = (
+        video_key,
+        str(metadata.get("id") or dados.get("video_id") or ""),
+        str(metadata.get("title") or ""),
+        json.dumps(artists, ensure_ascii=False),
+        str(metadata.get("album") or ""),
+        str(metadata.get("isrc") or ""),
+        float(metadata.get("duration") or 0),
+        str(metadata.get("thumbnail_url") or metadata.get("thumbnail") or ""),
+        str(metadata.get("cover_url") or ""),
+        track_status,
+        json.dumps(origem, ensure_ascii=False),
+        json.dumps(provenance, ensure_ascii=False),
+        json.dumps(confidence, ensure_ascii=False),
+        json.dumps(diagnostics_by_source, ensure_ascii=False),
+        json.dumps(dados, ensure_ascii=False),
+    )
+    conexao.execute(
+        """INSERT INTO music.music_tracks
+        (video_key, video_id, title, artists_json, album, isrc, duration,
+         thumbnail_url, cover_url, metadata_status, source_youtube_json,
+         provenance_json, confidence_json, diagnostics_json, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_key) DO UPDATE SET
+        video_id=excluded.video_id, title=excluded.title,
+        artists_json=excluded.artists_json, album=excluded.album,
+        isrc=excluded.isrc, duration=excluded.duration,
+        thumbnail_url=excluded.thumbnail_url, cover_url=excluded.cover_url,
+        metadata_status=excluded.metadata_status,
+        source_youtube_json=excluded.source_youtube_json,
+        provenance_json=excluded.provenance_json,
+        confidence_json=excluded.confidence_json,
+        diagnostics_json=excluded.diagnostics_json,
+        metadata_json=excluded.metadata_json, updated_at=CURRENT_TIMESTAMP""",
+        values,
+    )
 
 
 def salvar_resolucao(
@@ -370,23 +707,24 @@ def salvar_resolucao(
     audio_path: str = "",
 ) -> None:
     conexao.execute(
-        """INSERT INTO metadata_resolution
+        """INSERT INTO music.metadata_resolution
         (video_key, video_id, status, result_json, audio_path, updated_at)
         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(video_key) DO UPDATE SET
         video_id=excluded.video_id, status=excluded.status,
         result_json=excluded.result_json,
         audio_path=CASE WHEN excluded.audio_path != '' THEN excluded.audio_path
-                        ELSE metadata_resolution.audio_path END,
+                        ELSE music.metadata_resolution.audio_path END,
         updated_at=CURRENT_TIMESTAMP""",
         (
             video_key,
             str(resultado.get("video_id") or ""),
             str(resultado.get("status") or "PENDENTE"),
             json.dumps(resultado, ensure_ascii=False),
-            os.path.abspath(audio_path) if audio_path else "",
+            _caminho_relativo_banco(audio_path, conexao),
         ),
     )
+    _salvar_metadados_musica(conexao, video_key, resultado)
     conexao.commit()
 
 
@@ -416,12 +754,24 @@ def meta_do_resultado_hibrido(resultado: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def resolver_meta_hibrido(meta: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def resolver_meta_hibrido(
+    meta: dict[str, Any],
+    *,
+    dados_locais: dict[str, Any] | None = None,
+    sem_dados_youtube: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    campos_obrigatorios = ["title", "artists", "album"]
+    if EXIGIR_ISRC:
+        campos_obrigatorios.append("isrc")
     resultado = resolver_metadados(
         str(meta.get("id") or ""),
-        meta,
+        {} if sem_dados_youtube else meta,
         cache=RESOLVER_CACHE,
         musicbrainz_client=MUSICBRAINZ_CLIENT,
+        campos_obrigatorios=campos_obrigatorios,
+        exigir_isrc=EXIGIR_ISRC,
+        exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
+        dados_locais=dados_locais,
     ).to_dict()
     return meta_do_resultado_hibrido(resultado), resultado
 
@@ -483,17 +833,41 @@ def exportar_metadados_pendentes(
     """Exporta um CSV legível com uma linha por vídeo ainda sem comprovação clara."""
     destino = destino or os.path.join(BASE_DIR, "metadados_pendentes.csv")
     os.makedirs(os.path.dirname(os.path.abspath(destino)), exist_ok=True)
+    colunas_editaveis = [
+        "aplicar", "usar_titulo", "titulo_final", "usar_artistas", "artistas_finais",
+        "usar_album", "album_final", "usar_isrc", "isrc_final", "confirmar_manual",
+    ]
     colunas = [
-        "video_id", "url_youtube", "arquivo_audio", "playlists", "status",
+        "video_key", "video_id", "url_youtube", "arquivo_audio", "playlists", "status",
         "titulo_youtube", "artistas_youtube", "canal_youtube", "album_youtube", "titulo_usado",
         "artistas_usados", "album_sugerido", "isrc_youtube", "isrc_sugerido",
         "thumbnail_youtube", "capa_sugerida", "motivos_pendencia", "diagnosticos",
-        "candidatos_musicbrainz", "proveniencia", "confianca",
+        "diagnosticos_youtube", "diagnosticos_local", "diagnosticos_musicbrainz",
+        "candidatos_musicbrainz", "proveniencia", "confianca", *colunas_editaveis,
     ]
+    edicoes_anteriores: dict[str, dict[str, str]] = {}
+    colunas_anteriores: set[str] = set()
+    if os.path.isfile(destino):
+        try:
+            with open(destino, "r", encoding="utf-8-sig", newline="") as arquivo_existente:
+                reader = csv.DictReader(arquivo_existente)
+                colunas_anteriores = set(reader.fieldnames or [])
+                for registro_antigo in reader:
+                    chave = (registro_antigo.get("video_key") or "").strip()
+                    if not chave and registro_antigo.get("video_id"):
+                        chave = "youtube:" + registro_antigo["video_id"].strip()
+                    if chave:
+                        edicoes_anteriores[chave] = {
+                            coluna: registro_antigo.get(coluna, "") or ""
+                            for coluna in colunas_editaveis
+                            if coluna in colunas_anteriores
+                        }
+        except (OSError, csv.Error, UnicodeError) as exc:
+            print(f"Aviso: não consegui preservar edições anteriores de {destino}: {exc}")
     linhas = conexao.execute(
         """SELECT r.video_key, r.video_id, r.result_json, r.audio_path,
                   v.source_url
-           FROM metadata_resolution r
+           FROM music.metadata_resolution r
            LEFT JOIN video_cache v ON v.video_key = r.video_key
            WHERE r.status = 'PENDENTE'
            ORDER BY r.video_id, r.video_key"""
@@ -523,10 +897,11 @@ def exportar_metadados_pendentes(
                         (video_key,),
                     ).fetchall()
                 ]
-                writer.writerow({
+                dados = {
+                    "video_key": video_key,
                     "video_id": linha["video_id"],
                     "url_youtube": linha["source_url"] or "",
-                    "arquivo_audio": linha["audio_path"] or "",
+                    "arquivo_audio": _resolver_caminho_banco(linha["audio_path"] or "", conexao),
                     "playlists": " | ".join(playlists),
                     "status": resultado.get("status") or "PENDENTE",
                     "titulo_youtube": origem.get("title") or "",
@@ -542,6 +917,15 @@ def exportar_metadados_pendentes(
                     "capa_sugerida": metadata.get("cover_url") or "",
                     "motivos_pendencia": " | ".join(resultado.get("pending_reasons") or []),
                     "diagnosticos": " | ".join(resultado.get("diagnostics") or []),
+                    "diagnosticos_youtube": " | ".join(
+                        (resultado.get("diagnostics_by_source") or {}).get("youtube") or []
+                    ),
+                    "diagnosticos_local": " | ".join(
+                        (resultado.get("diagnostics_by_source") or {}).get("local") or []
+                    ),
+                    "diagnosticos_musicbrainz": " | ".join(
+                        (resultado.get("diagnostics_by_source") or {}).get("musicbrainz") or []
+                    ),
                     "candidatos_musicbrainz": json.dumps(
                         resultado.get("candidates") or [], ensure_ascii=False
                     ),
@@ -551,7 +935,23 @@ def exportar_metadados_pendentes(
                     "confianca": json.dumps(
                         resultado.get("confidence") or {}, ensure_ascii=False
                     ),
-                })
+                }
+                padroes = {
+                    "aplicar": "nao",
+                    "usar_titulo": "nao",
+                    "titulo_final": metadata.get("title") or "",
+                    "usar_artistas": "nao",
+                    "artistas_finais": " | ".join(metadata.get("artists") or []),
+                    "usar_album": "nao",
+                    "album_final": metadata.get("album") or "",
+                    "usar_isrc": "nao",
+                    "isrc_final": metadata.get("isrc") or "",
+                    "confirmar_manual": "nao",
+                }
+                antigas = edicoes_anteriores.get(video_key, {})
+                for coluna in colunas_editaveis:
+                    dados[coluna] = antigas.get(coluna, padroes[coluna])
+                writer.writerow(dados)
         os.replace(temporario, destino)
     finally:
         if os.path.exists(temporario):
@@ -654,7 +1054,7 @@ def nome_seguro(valor: str, fallback: str = "sem-nome") -> str:
 
 
 def criar_link_artista(arquivo_original: str, artista: str) -> bool:
-    """Cria um link para o arquivo central, sem copiar os dados da música."""
+    """Cria um atalho ao MP3 físico, sem copiar os dados da música."""
     pasta_artista = os.path.join(SONGS_DIR, nome_seguro(artista, "Artista Desconhecido"))
     destino = os.path.join(pasta_artista, os.path.basename(arquivo_original))
     os.makedirs(pasta_artista, exist_ok=True)
@@ -689,7 +1089,7 @@ def baixar_musica(
     csv_file: str = "",
     hybrid_result: dict[str, Any] | None = None,
 ) -> str | None:
-    """Salva no artista principal e, se ativado, liga colaboradores ao mesmo MP3."""
+    """Salva no artista principal e cria links de revisão/colaboradores conforme o caso."""
     if yt_dlp is None:
         registrar_erro(url, "Dependência yt-dlp não instalada", csv_file)
         print("Instale as dependências com: pip install -r requirements.txt")
@@ -705,14 +1105,14 @@ def baixar_musica(
     safe_id = nome_seguro(video_id, "sem-id") if video_id else "sem-id"
     filename = f"{safe_title} [{safe_id}].mp3"
 
-    # A primeira posição dos créditos é tratada como artista principal.
-    # Não há pasta central de MP3: o próprio arquivo fica nesta pasta.
+    # A primeira posição dos créditos disponíveis define a pasta física, mesmo
+    # quando provisórios. Se nenhum artista veio do vídeo/base, usa a pasta
+    # explícita de fallback; o uploader nunca é promovido no modo híbrido.
     pendente = bool(hybrid_result and hybrid_result.get("status") == "PENDENTE")
-    pasta_download = (
-        os.path.join(SONGS_DIR, "_pendentes")
-        if pendente
-        else os.path.join(SONGS_DIR, nome_seguro(artists[0], "Artista Desconhecido"))
-    )
+    artista_principal = nome_seguro(artists[0], "Artista Desconhecido")
+    if artista_principal.casefold() in {"_pendentes", "_library"}:
+        artista_principal = "Artista Desconhecido"
+    pasta_download = os.path.join(SONGS_DIR, artista_principal)
     os.makedirs(pasta_download, exist_ok=True)
 
     filepath_mp3 = os.path.join(pasta_download, filename)
@@ -757,7 +1157,11 @@ def baixar_musica(
 
     if hybrid_result:
         aplicar_tags_hibridas(filepath_mp3, hybrid_result)
-    if ARTIST_LINKS and not pendente:
+    if pendente:
+        # `_pendentes` é apenas uma entrada de navegação; o MP3 físico fica
+        # junto ao artista e o link não cria uma segunda cópia do áudio.
+        criar_link_artista(filepath_mp3, "_pendentes")
+    elif ARTIST_LINKS:
         for nome in artists:
             criar_link_artista(filepath_mp3, nome)
     return filepath_mp3
@@ -849,7 +1253,7 @@ def processar_csv(
     playlist_name = os.path.splitext(os.path.basename(csv_file))[0]
     m3u_path = os.path.join(PLAYLISTS_DIR, f"{playlist_name}.m3u")
     playlist_entries: list[tuple[str, str, int | float, str]] = []
-    state_key = os.path.normcase(os.path.realpath(csv_path))
+    state_key = _chave_csv(csv_path)
     assinatura = assinatura_csv(csv_path) if estado is not None else ""
     start_row = 0
 
@@ -905,6 +1309,8 @@ def processar_csv(
                 video_key = ""
                 url = ""
                 meta: dict[str, Any] | None = None
+                dados_locais: dict[str, Any] | None = None
+                sem_dados_youtube = False
                 music_path: str | None = None
                 hybrid_result: dict[str, Any] | None = None
 
@@ -915,6 +1321,13 @@ def processar_csv(
                     if url.lower().startswith(("http://", "https://")):
                         video_key, video_id = obter_chave_video(url)
                         registro = ler_video_cache(estado, video_key) if estado is not None else None
+                        if estado is not None and not estado.execute(
+                            "SELECT 1 FROM download_jobs WHERE video_key = ?", (video_key,)
+                        ).fetchone():
+                            registrar_job_download(
+                                estado, video_key, url, "PENDENTE", video_id=video_id
+                            )
+                            estado.commit()
 
                         if registro and registro["status"] == "failed" and not reprocess:
                             print(f"Falha já registrada localmente; ignorando sem nova consulta: {url}")
@@ -927,12 +1340,17 @@ def processar_csv(
                             ):
                                 meta = meta_do_registro(registro)
                                 music_path = registro["path"]
+                                dados_locais = metadados_de_arquivo_local(
+                                    music_path, video_id
+                                ).get("local_metadata")
                                 print(f"Já está baixada; reutilizando sem acessar o YouTube: {url}")
                             elif video_id and indice_local and os.path.isfile(indice_local.get(video_id, "")):
                                 music_path = indice_local[video_id]
                                 meta = metadados_de_arquivo_local(
                                     music_path, video_id, row[1] if len(row) > 1 else ""
                                 )
+                                dados_locais = meta.get("local_metadata")
+                                sem_dados_youtube = True
                                 if estado is not None:
                                     salvar_video_cache(
                                         estado, video_key, url, "complete", meta, music_path
@@ -950,10 +1368,19 @@ def processar_csv(
                                         break
                                     if meta and estado is not None:
                                         salvar_video_cache(estado, video_key, url, "metadata", meta)
+                                        registrar_job_download(
+                                            estado, video_key, url, "METADADOS",
+                                            video_id=meta.get("id") or video_id,
+                                        )
+                                        _salvar_metadados_musica(estado, video_key, meta)
                                         estado.commit()
                                     elif estado is not None:
                                         salvar_video_cache(
                                             estado, video_key, url, "failed",
+                                            error="Não foi possível obter os metadados",
+                                        )
+                                        registrar_job_download(
+                                            estado, video_key, url, "ERRO", video_id=video_id,
                                             error="Não foi possível obter os metadados",
                                         )
 
@@ -965,6 +1392,7 @@ def processar_csv(
                                 tentar_novamente = bool(
                                     salvo_hibrido and reprocess
                                     and salvo_hibrido["result"].get("status") == "PENDENTE"
+                                    and not (salvo_hibrido["result"].get("manual_review") or {}).get("fields")
                                 )
                                 if salvo_hibrido and not tentar_novamente:
                                     hybrid_result = salvo_hibrido["result"]
@@ -976,9 +1404,22 @@ def processar_csv(
                                     ):
                                         music_path = caminho_salvo
                                 else:
-                                    meta, hybrid_result = resolver_meta_hibrido(meta)
+                                    if music_path and not dados_locais:
+                                        dados_locais = metadados_de_arquivo_local(
+                                            music_path, video_id
+                                        ).get("local_metadata")
+                                    meta, hybrid_result = resolver_meta_hibrido(
+                                        meta,
+                                        dados_locais=dados_locais,
+                                        sem_dados_youtube=sem_dados_youtube,
+                                    )
                                     if estado is not None:
                                         salvar_resolucao(estado, video_key, hybrid_result)
+                                if estado is not None and hybrid_result:
+                                    _salvar_metadados_musica(estado, video_key, hybrid_result)
+
+                            if meta and estado is not None and not MODELO_HIBRIDO:
+                                _salvar_metadados_musica(estado, video_key, meta)
 
                             if meta and music_path and hybrid_result:
                                 aplicar_tags_hibridas(music_path, hybrid_result)
@@ -994,6 +1435,12 @@ def processar_csv(
 
                             if meta and not music_path:
                                 try:
+                                    if estado is not None:
+                                        registrar_job_download(
+                                            estado, video_key, url, "BAIXANDO",
+                                            video_id=meta.get("id") or video_id,
+                                        )
+                                        estado.commit()
                                     if MODELO_HIBRIDO:
                                         music_path = baixar_musica(
                                             url, meta["artists"], meta["title"], meta["id"],
@@ -1013,9 +1460,19 @@ def processar_csv(
                                     bloqueado = True
                                     break
 
+                            if (
+                                music_path and hybrid_result
+                                and hybrid_result.get("status") == "PENDENTE"
+                            ):
+                                criar_link_artista(music_path, "_pendentes")
+
                             if music_path and estado is not None and meta:
                                 salvar_video_cache(
                                     estado, video_key, url, "complete", meta, music_path
+                                )
+                                registrar_job_download(
+                                    estado, video_key, url, "CONCLUIDO",
+                                    video_id=meta.get("id") or video_id, path=music_path,
                                 )
                                 if hybrid_result:
                                     salvar_resolucao(
@@ -1025,6 +1482,18 @@ def processar_csv(
                                 salvar_video_cache(
                                     estado, video_key, url, "failed", meta,
                                     error="Não foi possível baixar o áudio",
+                                )
+                                registrar_job_download(
+                                    estado, video_key, url, "ERRO",
+                                    video_id=meta.get("id") or video_id,
+                                    error="Não foi possível baixar o áudio",
+                                )
+
+                            if music_path and estado is not None and meta:
+                                # Inclui também reutilização de um MP3 local existente.
+                                registrar_job_download(
+                                    estado, video_key, url, "CONCLUIDO",
+                                    video_id=meta.get("id") or video_id, path=music_path,
                                 )
 
                         if (
@@ -1066,9 +1535,9 @@ def atualizar(csv_file: str) -> None:
 
 def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Baixa músicas de CSVs do YouTube e cria playlists M3U")
-    parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta base dos CSVs (padrão: diretório atual)")
-    parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas (padrão: songs)")
-    parser.add_argument("-p", "--PlaylistDir", dest="playlist_dir", help="Pasta das playlists (padrão: playlists)")
+    parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta dos CSVs (padrão: diretório atual)")
+    parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas; sem esta opção, usa diretamente BaseDir")
+    parser.add_argument("-p", "--PlaylistDir", dest="playlist_dir", help="Pasta das M3Us; sem esta opção, usa diretamente BaseDir")
     parser.add_argument("-l", "--LogFile", dest="log_file", help="Arquivo de log (padrão: Logs.txt)")
     parser.add_argument("--lista", help="Caminho de um CSV específico; sem esta opção, processa os CSVs da pasta base")
     parser.add_argument("--row", type=int, default=2, help="Índice da coluna da URL, começando em 0 (padrão: 2; aceita índices negativos)")
@@ -1087,8 +1556,25 @@ def criar_parser() -> argparse.ArgumentParser:
         help="Consulta o MusicBrainz, prioriza correspondências confiáveis e registra metadados provisórios para revisão",
     )
     parser.add_argument(
-        "--state-file", default="pltube_state.sqlite3",
-        help="Banco local de progresso e downloads reutilizáveis (padrão: pltube_state.sqlite3)",
+        "--downloads-db", "--state-file", dest="state_file",
+        default=os.path.join("sql", "downloads.sqlite3"),
+        help="SQLite de downloads/retomada (padrão: <BaseDir>/sql/downloads.sqlite3; --state-file é alias)",
+    )
+    parser.add_argument(
+        "--metadata-db", default=os.path.join("sql", "musicas.sqlite3"),
+        help="SQLite de metadados musicais (padrão: <BaseDir>/sql/musicas.sqlite3)",
+    )
+    parser.add_argument(
+        "--legacy-state-file", default="pltube_state.sqlite3",
+        help="Banco antigo único a migrar, se existir (padrão: <BaseDir>/pltube_state.sqlite3)",
+    )
+    parser.add_argument(
+        "--exigir-isrc", action="store_true",
+        help="No modelo híbrido, deixa pendente se não houver ISRC confirmado",
+    )
+    parser.add_argument(
+        "--exigir-artista-musicbrainz", action="store_true",
+        help="No modelo híbrido, exige que o artista seja confirmado pelo MusicBrainz ou manualmente",
     )
     parser.add_argument(
         "--reprocess", action="store_true",
@@ -1118,9 +1604,23 @@ def main(argv: list[str] | None = None) -> int:
     state_path = args.state_file
     if not os.path.isabs(state_path):
         state_path = os.path.join(BASE_DIR, state_path)
+    metadata_path = args.metadata_db
+    if not os.path.isabs(metadata_path):
+        metadata_path = os.path.join(BASE_DIR, metadata_path)
+    legacy_path = args.legacy_state_file
+    if legacy_path and not os.path.isabs(legacy_path):
+        legacy_path = os.path.join(BASE_DIR, legacy_path)
     try:
-        estado = abrir_banco_estado(state_path)
-    except sqlite3.Error as exc:
+        estado = abrir_banco_estado(state_path, metadata_path)
+        migracao = migrar_banco_legado(estado, legacy_path) if legacy_path else {}
+        if any(migracao.values()):
+            print(
+                "Banco antigo migrado sem apagá-lo: "
+                f"{migracao['downloads']} vídeo(s), "
+                f"{migracao['playlists']} item(ns) de playlist, "
+                f"{migracao['metadados']} resolução(ões)."
+            )
+    except (sqlite3.Error, OSError, ValueError) as exc:
         print(f"Não foi possível abrir o banco de progresso {state_path}: {exc}")
         return 1
 

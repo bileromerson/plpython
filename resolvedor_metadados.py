@@ -79,7 +79,9 @@ class ResolutionResult:
     pending_reasons: list[str] = field(default_factory=list)
     candidates: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
+    diagnostics_by_source: dict[str, list[str]] = field(default_factory=dict)
     source_youtube: dict[str, Any] = field(default_factory=dict)
+    source_local: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Retorna uma cópia simples apropriada para JSON/SQLite."""
@@ -244,6 +246,9 @@ def resolver_metadados(
     limite_candidatos: int = 10,
     limiar_correspondencia: float = 0.82,
     margem_correspondencia: float = 0.06,
+    exigir_isrc: bool = False,
+    exigir_artista_musicbrainz: bool = False,
+    dados_locais: Mapping[str, Any] | None = None,
 ) -> ResolutionResult:
     """Combina correções confirmadas, yt-dlp e correspondências do MusicBrainz.
 
@@ -269,14 +274,15 @@ def resolver_metadados(
     cache = cache if cache is not None else {}
     manual = _confirmed_manual_record(correcoes_locais, video_id)
     yt = _extract_youtube_metadata(dados_ytdlp)
+    local = _extract_local_metadata(dados_locais)
 
     metadata: dict[str, Any] = {
         "id": _text(video_id) or _text(dados_ytdlp.get("id")),
-        "title": yt["title"],
-        "artists": list(yt["artists"]),
-        "artist": yt["artists"][0] if yt["artists"] else "",
-        "album": yt["album"],
-        "isrc": yt["isrc"],
+        "title": yt["title"] or local["title"],
+        "artists": list(yt["artists"] or local["artists"]),
+        "artist": (yt["artists"] or local["artists"] or [""])[0],
+        "album": yt["album"] or local["album"],
+        "isrc": yt["isrc"] or local["isrc"],
         "duration": yt["duration"],
         "uploader": yt["uploader"],
         "thumbnail_url": yt["thumbnail_url"],
@@ -289,9 +295,12 @@ def resolver_metadados(
     provenance: dict[str, str] = {}
     confidence: dict[str, str] = {}
     for field_name in ("title", "artists", "album", "isrc", "duration", "thumbnail_url"):
-        if _has_value(metadata.get(field_name)):
+        if _has_value(yt.get(field_name)):
             provenance[field_name] = "youtube"
             confidence[field_name] = "provisoria"
+        elif field_name in local and _has_value(local.get(field_name)):
+            provenance[field_name] = "local"
+            confidence[field_name] = "tag_local_provisoria"
     if metadata["uploader"]:
         provenance["uploader"] = "youtube"
         confidence["uploader"] = "origem_nao_artista"
@@ -300,8 +309,23 @@ def resolver_metadados(
 
     candidates: list[dict[str, Any]] = []
     diagnostics: list[str] = []
+    diagnostics_by_source: dict[str, list[str]] = {
+        "youtube": [],
+        "local": [],
+        "musicbrainz": [],
+    }
+    if not yt["isrc"]:
+        diagnostics_by_source["youtube"].append("yt-dlp/YouTube não forneceu um ISRC válido")
+    if not yt["artists"]:
+        diagnostics_by_source["youtube"].append("yt-dlp/YouTube não forneceu crédito de artista")
+    if local["isrc"] and not yt["isrc"]:
+        diagnostics_by_source["local"].append("ISRC recuperado das tags locais do MP3")
+    if local["title"] or local["artists"] or local["album"]:
+        diagnostics_by_source["local"].append("Metadados locais disponíveis como fallback")
     ambiguity_reasons: list[str] = []
     accepted_match = False
+    search_attempted = False
+    saw_musicbrainz_candidates = False
     release_state = "not_checked"
     client = musicbrainz_client
     if consultar_musicbrainz and client is None:
@@ -328,11 +352,13 @@ def resolver_metadados(
         normalized_isrc = normalize_isrc(metadata["isrc"])
         try:
             if normalized_isrc:
+                search_attempted = True
                 raw_candidates = _cached_search(
                     cache,
                     f"isrc:{normalized_isrc}",
                     lambda: client.search_by_isrc(normalized_isrc, limit=limite_candidatos),
                 )
+                saw_musicbrainz_candidates = saw_musicbrainz_candidates or bool(raw_candidates)
                 exact = [
                     item
                     for item in raw_candidates
@@ -381,7 +407,9 @@ def resolver_metadados(
                         search_operation = lambda: client.search_by_title(
                             title, limit=limite_candidatos
                         )
+                    search_attempted = True
                     raw_candidates = _cached_search(cache, search_key, search_operation)
+                    saw_musicbrainz_candidates = saw_musicbrainz_candidates or bool(raw_candidates)
                     ranked = _rank_candidates(
                         raw_candidates,
                         title=title,
@@ -425,13 +453,39 @@ def resolver_metadados(
                             manual,
                         )
                         _mark_youtube_fields_validated(
-                            metadata, provenance, confidence
+                            metadata, provenance, confidence, chosen
                         )
         except (MusicBrainzError, OSError, ValueError, TimeoutError) as exc:
             diagnostics.append(f"MusicBrainz indisponível: {exc}")
+            diagnostics_by_source["musicbrainz"].append(
+                f"MusicBrainz indisponível: {exc}"
+            )
         except Exception as exc:
             # Um cliente injetado também pode propagar erros de transporte próprios.
             diagnostics.append(f"Falha na consulta de metadados: {exc}")
+            diagnostics_by_source["musicbrainz"].append(
+                f"Falha na consulta de metadados: {exc}"
+            )
+
+    if search_attempted and not accepted_match and not ambiguity_reasons:
+        mensagem = (
+            "MusicBrainz retornou candidatos, mas nenhum atingiu o limiar de correspondência"
+            if saw_musicbrainz_candidates
+            else "MusicBrainz não encontrou uma correspondência para ISRC/título/artista"
+        )
+        diagnostics_by_source["musicbrainz"].append(mensagem)
+    if accepted_match and provenance.get("artists") == "youtube":
+        diagnostics_by_source["musicbrainz"].append(
+            "MusicBrainz aceitou a gravação, mas não retornou artistas para confirmar o crédito do vídeo"
+        )
+    if should_search and not search_attempted and client is not None and not metadata["title"]:
+        diagnostics_by_source["musicbrainz"].append(
+            "MusicBrainz não foi consultado porque o vídeo não forneceu título"
+        )
+    if ambiguity_reasons:
+        diagnostics_by_source["musicbrainz"].append(
+            "MusicBrainz retornou mais de uma correspondência plausível"
+        )
 
     # Correções locais confirmadas vencem todos os resultados automáticos.
     manual_values = _manual_values(manual)
@@ -467,7 +521,9 @@ def resolver_metadados(
 
     required = set(campos_obrigatorios)
     for field_name in campos_obrigatorios:
-        if _manual_field_confirmed_empty(manual, field_name):
+        if _manual_field_confirmed_empty(manual, field_name) and not (
+            field_name == "isrc" and exigir_isrc
+        ):
             continue
         if field_name == "artists":
             value = metadata.get("artists")
@@ -481,14 +537,40 @@ def resolver_metadados(
             reasons.append(f"campo obrigatório ausente: {field_name}")
 
     if "artists" in required and metadata.get("artists") and provenance.get("artists") == "youtube":
-        if not accepted_match and not _manual_has_field(manual, "artists"):
+        if not _manual_has_field(manual, "artists"):
             reasons.append("artista informado somente pelo vídeo, sem confirmação independente")
     if "title" in required and metadata.get("title") and provenance.get("title") == "youtube":
-        if not accepted_match and not _manual_has_field(manual, "title"):
+        if not _manual_has_field(manual, "title"):
             reasons.append("título informado somente pelo vídeo, sem confirmação independente")
     if "album" in required and metadata.get("album") and provenance.get("album") == "youtube":
         if not accepted_match and not _manual_has_field(manual, "album"):
             reasons.append("álbum informado somente pelo vídeo, sem lançamento confirmado")
+    for field_name, rotulo in (
+        ("title", "título"), ("artists", "artista"), ("album", "álbum")
+    ):
+        if (
+            field_name in required
+            and _has_value(metadata.get(field_name))
+            and provenance.get(field_name) == "local"
+            and not _manual_has_field(manual, field_name)
+        ):
+            reasons.append(f"{rotulo} veio de tags/estrutura local, sem confirmação independente")
+    if exigir_isrc and metadata.get("isrc") and provenance.get("isrc") not in {
+        "musicbrainz", "manual"
+    }:
+        reasons.append("ISRC disponível, mas não confirmado pelo MusicBrainz ou por revisão manual")
+    if exigir_artista_musicbrainz:
+        fontes_confiaveis_artista = {
+            "musicbrainz", "youtube_validado_musicbrainz", "manual"
+        }
+        if (
+            not metadata.get("artists")
+            or provenance.get("artists") not in fontes_confiaveis_artista
+        ):
+            reasons.append("artista não confirmado pelo MusicBrainz ou por revisão manual")
+            diagnostics_by_source["musicbrainz"].append(
+                "Nenhum artista foi confirmado pelo MusicBrainz"
+            )
     if cover_required and metadata.get("cover_url") and provenance.get("cover_url") == "youtube_thumbnail_fallback":
         reasons.append("há apenas thumbnail do vídeo, não capa de lançamento confirmada")
     if cover_required and not (metadata.get("cover_url") or metadata.get("cover_file")):
@@ -505,8 +587,17 @@ def resolver_metadados(
         confidence=confidence,
         pending_reasons=reasons,
         candidates=candidates,
-        diagnostics=diagnostics,
-        source_youtube=copy.deepcopy(yt),
+        diagnostics=list(dict.fromkeys(
+            diagnostics
+            + diagnostics_by_source["youtube"]
+            + diagnostics_by_source["musicbrainz"]
+        )),
+        diagnostics_by_source={
+            fonte: list(dict.fromkeys(mensagens))
+            for fonte, mensagens in diagnostics_by_source.items()
+        },
+        source_youtube=yt,
+        source_local=local,
     )
 
 
@@ -587,6 +678,18 @@ def _extract_youtube_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
         "duration": duration,
         "thumbnails": thumbnails,
         "thumbnail_url": thumbnails[0]["url"] if thumbnails else "",
+    }
+
+
+def _extract_local_metadata(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normaliza tags já gravadas no MP3 sem classificá-las como dados do YouTube."""
+    if not isinstance(data, Mapping):
+        data = {}
+    return {
+        "title": _text(data.get("title")),
+        "artists": _artists(data.get("artists") or data.get("artist")),
+        "album": _text(data.get("album")),
+        "isrc": normalize_isrc(data.get("isrc") or data.get("tsrc")),
     }
 
 
@@ -736,9 +839,14 @@ def _mark_youtube_fields_validated(
     metadata: Mapping[str, Any],
     provenance: dict[str, str],
     confidence: dict[str, str],
+    candidate: Mapping[str, Any],
 ) -> None:
     """Marca título/créditos do vídeo como corroborados por match forte."""
     for field_name in ("title", "artists"):
+        if field_name == "artists" and not _artists(candidate.get("artists")):
+            continue
+        if field_name == "title" and not _text(candidate.get("title")):
+            continue
         if _has_value(metadata.get(field_name)) and provenance.get(field_name) == "youtube":
             provenance[field_name] = "youtube_validado_musicbrainz"
             confidence[field_name] = "correspondencia_forte"

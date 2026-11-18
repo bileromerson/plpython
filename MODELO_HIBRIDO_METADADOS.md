@@ -1,6 +1,6 @@
 # Especificação: modelo híbrido de metadados
 
-**Estado:** implementação inicial disponível no downloader por `--modelo-hibrido`. A importação de correções manuais e sua aplicação em lote ainda não estão implementadas.
+**Estado:** o downloader e o resolvedor funcionam por `--modelo-hibrido`. A planilha editável e o aplicador seguro estão disponíveis; reorganizar os arquivos após a revisão e incorporar capas continuam futuros.
 
 ## Objetivo
 
@@ -24,23 +24,23 @@ Uma faixa fica com status `PENDENTE` quando não for possível confirmar algum c
 
 O nome do canal/uploader permanece disponível para referência, mas não é gravado como crédito de artista. Os campos desconhecidos ficam vazios, em vez de receberem um valor inventado. O título original do vídeo fica preservado para que a faixa continue identificável.
 
-Novos downloads pendentes ficam em `songs/_pendentes/`, com o ID do vídeo no nome, sem link de artista. Os valores disponíveis do YouTube (exceto uploader como artista) continuam utilizáveis, mas recebem a marca ID3 `PLTUBE_METADATA_STATUS=PENDENTE` e uma observação de que podem estar incorretos. Uma faixa já existente não é movida automaticamente: seu caminho original é mantido no relatório e o MP3 recebe as tags de status quando o modo é executado novamente. Depois de uma futura correção manual, a organização final deverá usar um único arquivo físico e links somente para créditos confirmados.
+Novos downloads pendentes ficam fisicamente na pasta do primeiro artista disponível dentro da raiz de músicas configurada; sem crédito de artista, usam `Artista Desconhecido/`. A pasta `_pendentes/`, dentro dessa mesma raiz, contém um link de atalho para o mesmo MP3, sem ocupar espaço adicional. Não são criados links para artistas colaboradores enquanto os créditos estiverem pendentes. Os valores disponíveis do YouTube (exceto uploader como artista) recebem a marca ID3 `PLTUBE_METADATA_STATUS=PENDENTE` e uma observação de que podem estar incorretos. Uma faixa já existente não é movida automaticamente: seu caminho original é mantido no relatório e o MP3 recebe as tags de status quando o modo é executado novamente.
 
 ## Relatório de pendências
 
-O downloader gera/atualiza `metadados_pendentes.csv` em UTF-8 com BOM, compatível com Excel e LibreOffice. Ele tem uma linha por ID de vídeo, mesmo quando a faixa aparece em vários CSVs. O SQLite mantém os resultados completos, caminhos, candidatos e playlists; o CSV atual é um relatório de leitura, ainda não importa correções manuais.
+O downloader gera/atualiza `metadados_pendentes.csv` em UTF-8 com BOM, compatível com Excel e LibreOffice. Há uma linha por ID de vídeo, mesmo quando a faixa aparece em vários CSVs. A planilha contém sugestões preenchidas e colunas editáveis de seleção/valor final. As edições manuais são preservadas quando a fila é reexportada. `downloads.sqlite3` mantém estados, caminhos relativos e playlists; `musicas.sqlite3` mantém os metadados estruturados, proveniência e resultados completos.
 
 Colunas atualmente exportadas:
 
-- `video_id`, `url_youtube`, `arquivo_audio`, `playlists` e `status`: identificação/localização.
+- `video_key`, `video_id`, `url_youtube`, `arquivo_audio`, `playlists` e `status`: identificação/localização.
 - `titulo_youtube`, `artistas_youtube`, `canal_youtube`, `album_youtube`, `isrc_youtube` e `thumbnail_youtube`: origem do vídeo; canal/uploader é apenas publicador.
 - `titulo_usado`, `artistas_usados`, `album_sugerido`, `isrc_sugerido` e `capa_sugerida`: valores em uso ou sugestões da resolução.
-- `motivos_pendencia`, `diagnosticos`, `candidatos_musicbrainz`, `proveniencia` e `confianca`: motivo/erro, candidatos identificáveis e origem/confiança por campo.
-- Os campos de correção (`titulo_corrigido`, `artistas_corrigidos`, `album_corrigido`, `isrc_corrigido`, `capa_arquivo` e `status_revisao`) são parte do próximo passo; não edite o relatório atual esperando que o downloader aplique mudanças, pois ele é regenerado e ainda não importa correções.
+- `motivos_pendencia`, `diagnosticos`, `diagnosticos_youtube`, `diagnosticos_local`, `diagnosticos_musicbrainz`, `candidatos_musicbrainz`, `proveniencia` e `confianca`: motivo/erro, diagnósticos rotulados por fonte, candidatos identificáveis e origem/confiança por campo.
+- `aplicar`, `usar_titulo`, `titulo_final`, `usar_artistas`, `artistas_finais`, `usar_album`, `album_final`, `usar_isrc`, `isrc_final` e `confirmar_manual`: controles editáveis. Todos os controles `usar_*`, `aplicar` e `confirmar_manual` começam como `nao`; as sugestões aparecem nos campos `_final`, mas só são gravadas se você marcar explicitamente os controles.
 
-Para múltiplos artistas, `artistas_corrigidos` usa `|` como separador, por exemplo `Artista Um|Artista Dois`. Isso preserva vírgulas e `&` que façam parte do nome de uma banda. Em caso de álbum intencionalmente desconhecido, o usuário pode deixar o campo vazio e confirmar a revisão; o programa não deve obrigar a inventar um álbum.
+Para múltiplos artistas, `artistas_finais` usa `|` como separador, por exemplo `Artista Um|Artista Dois`. Isso preserva vírgulas e `&` que façam parte do nome de uma banda. Para apagar explicitamente o álbum ou ISRC, preencha o respectivo campo `_final` com `__LIMPAR__`. `confirmar_manual=sim` marca a revisão concluída quando título e ao menos um artista estão preenchidos; álbum pode ficar vazio se você decidiu que é desconhecido.
 
-Quando a entrada de correções for implementada, o programa deverá preservar campos editados, validar o estado `CORRIGIDO`, aplicar mudanças às tags/caminhos/M3Us e marcar `APLICADO`. Essa parte permanece futura; o CSV atual não é editável como entrada.
+Para simular as escolhas sem alterar arquivos, execute `python aplicar_metadados.py --BaseDir ./csvs`. Depois de revisar o plano, acrescente `--apply` para gravar tags ID3, atualizar os dois bancos SQLite e os nomes nas M3Us. O aplicador não consulta serviços externos, não baixa áudio e não move/renomeia o MP3. Revisões parciais continuam pendentes; campos manuais parciais em cache não são substituídos por `--reprocess`.
 
 ## Integração proposta com o downloader
 
@@ -55,13 +55,15 @@ O fluxo atual do downloader é:
 
 1. Obter do `yt-dlp` os dados do vídeo, como já faz hoje.
 2. Em `--modelo-hibrido`, consultar o MusicBrainz por ISRC e, quando necessário, por título/artista ou título isolado; valores aceitos do banco substituem os do YouTube.
-3. Baixar usando os dados resolvidos. Se pendentes, guardar novos arquivos em `songs/_pendentes/`, marcar tags ID3 e persistir candidatos/proveniência no SQLite.
+3. Baixar usando os dados resolvidos. Se pendentes, guardar o MP3 físico na pasta do artista disponível (ou em `Artista Desconhecido`), criar em `_pendentes` somente um link para ele, marcar tags ID3 e persistir candidatos/proveniência no SQLite.
 4. Gerar `metadados_pendentes.csv` com caminho, motivo, fontes e candidatos. Vídeos repetidos em várias playlists têm uma única entrada e reutilizam o resultado/cache.
-5. Uma futura ferramenta de revisão deverá importar correções e atualizar o arquivo, tags, links e M3Us sem baixar o áudio novamente.
+5. `aplicar_metadados.py` lê as linhas explicitamente marcadas, simula por padrão e, com `--apply`, atualiza as tags escolhidas, o estado SQLite e as M3Us sem baixar áudio novamente.
 
-O banco SQLite existente deve continuar controlando retomada e reutilização entre playlists. A camada nova acrescentaria status de revisão e proveniência dos campos — por exemplo, `manual`, `youtube`, `musicbrainz` ou `cover_art_archive` — sem refazer chamadas para vídeos já resolvidos.
+O banco antigo único `pltube_state.sqlite3`, quando encontrado, é migrado uma vez sem ser apagado. O novo `downloads.sqlite3` controla retomada e reutilização entre playlists; `musicas.sqlite3` mantém uma linha por faixa, campos consultáveis e o JSON detalhado. Os caminhos para áudio são relativos à pasta do banco de downloads (por exemplo, `../songs/Artista A/musica1.mp3`) e os caminhos dos CSVs são relativos a `--BaseDir`.
 
-O modelo permanece opt-in: sem `--modelo-hibrido`, o comportamento anterior do downloader continua valendo. A ferramenta ainda não aplica correções editadas no CSV nem transfere automaticamente áudios já existentes para `songs/_pendentes/`.
+Os argumentos opcionais `--exigir-isrc` e `--exigir-artista-musicbrainz` tornam esses campos requisitos explícitos no download. Diagnósticos como ausência de ISRC no yt-dlp ou falta de artista retornado pelo MusicBrainz ficam separados por fonte nos bancos e, para faixas pendentes, na planilha. O programa não escreve metadados de volta no YouTube.
+
+O modelo permanece opt-in: sem `--modelo-hibrido`, o comportamento anterior do downloader continua valendo. O aplicador não move os áudios para outra pasta nem cria links de artista; o caminho existente é preservado.
 
 ## Respeito às fontes e limites
 
@@ -72,12 +74,13 @@ A capa escolhida deve manter a URL de origem e a referência do lançamento. A e
 ## Testes de aceitação
 
 - Um canal/uploader não é gravado como artista quando não há crédito confiável.
-- Uma correção manual prevalece sobre o YouTube e sobre resultados automáticos.
+- A planilha começa sem ações aprovadas; só `aplicar=sim` e os controles `usar_*` selecionados alteram campos.
+- A simulação não altera MP3/SQLite; `--apply` atualiza tags, provenance, estado local e M3Us relacionadas.
 - ISRC exato reutiliza uma gravação, mas deixa álbum/capa pendentes quando houver mais de uma edição plausível.
 - Busca fuzzy aceita erros pequenos com pontuação/margem; busca ambígua não escolhe um resultado silenciosamente.
 - Sem correspondência, os dados do vídeo são provisórios, o uploader não vira artista e o arquivo ganha status ID3 `PENDENTE`.
-- Um novo arquivo pendente fica em `songs/_pendentes/` e aparece uma vez em `metadados_pendentes.csv`, com o ID, motivos e candidatos.
-- Preencher as correções e executar novamente atualiza tags, destino do áudio, links de artistas (se habilitados) e M3Us de todas as playlists que usam o vídeo.
+- Um novo MP3 pendente fica fisicamente na pasta do artista, e `_pendentes` aponta para ele com um link; a faixa aparece uma vez em `metadados_pendentes.csv`.
+- Correções parciais permanecem pendentes e preservadas; uma revisão confirmada com título e artista atualiza os dados e remove a faixa da fila.
 - O processamento de um vídeo já resolvido não repete consultas externas em execuções posteriores.
 - Nomes de artista contendo vírgulas ou `&` são preservados; `|` separa créditos múltiplos no campo editável.
 - Uma capa de álbum confirmada tem prioridade sobre thumbnails do vídeo; no máximo uma imagem é incorporada por padrão.

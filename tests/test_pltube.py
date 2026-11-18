@@ -1,5 +1,7 @@
 import csv
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -203,7 +205,7 @@ class PltubeTests(unittest.TestCase):
 
             def download(url, artists, title, video_id, csv_file, hybrid_result=None):
                 self.assertEqual(hybrid_result["status"], "PENDENTE")
-                pasta = os.path.join(songs, "_pendentes")
+                pasta = os.path.join(songs, artists[0])
                 os.makedirs(pasta, exist_ok=True)
                 path = os.path.join(pasta, f"{title} [{video_id}].mp3")
                 with open(path, "wb") as audio:
@@ -225,12 +227,31 @@ class PltubeTests(unittest.TestCase):
                             pltube.processar_csv("lista.csv", estado=state, indice_local={})
                         )
 
-                    path = os.path.join(songs, "_pendentes", "Canção provisória [abc123].mp3")
+                    path = os.path.join(songs, "Artista do vídeo", "Canção provisória [abc123].mp3")
                     self.assertTrue(os.path.isfile(path))
-                    self.assertFalse(os.path.exists(os.path.join(songs, "Artista do vídeo")))
+                    pending_link = os.path.join(songs, "_pendentes", os.path.basename(path))
+                    self.assertTrue(os.path.islink(pending_link))
+                    self.assertEqual(os.path.realpath(pending_link), os.path.realpath(path))
                     saved = pltube.carregar_resolucao(state, "youtube:abc123")
                     self.assertEqual(saved["result"]["status"], "PENDENTE")
                     self.assertEqual(saved["audio_path"], path)
+                    job = state.execute(
+                        "SELECT status, audio_path FROM download_jobs WHERE video_key = ?",
+                        ("youtube:abc123",),
+                    ).fetchone()
+                    self.assertEqual(job["status"], "CONCLUIDO")
+                    self.assertFalse(os.path.isabs(job["audio_path"]))
+                    track = state.execute(
+                        "SELECT title, artists_json, metadata_status FROM music.music_tracks "
+                        "WHERE video_key = ?",
+                        ("youtube:abc123",),
+                    ).fetchone()
+                    self.assertEqual(track["title"], "Canção provisória")
+                    self.assertEqual(track["metadata_status"], "PENDENTE")
+                    self.assertFalse(os.path.samefile(
+                        dict((row[1], row[2]) for row in state.execute("PRAGMA database_list"))["main"],
+                        dict((row[1], row[2]) for row in state.execute("PRAGMA database_list"))["music"],
+                    ))
 
                     report = pltube.exportar_metadados_pendentes(
                         state, os.path.join(temp, "metadados_pendentes.csv")
@@ -346,10 +367,13 @@ class PltubeTests(unittest.TestCase):
                     saved = pltube.carregar_resolucao(state, "youtube:abc123")
                     self.assertEqual(saved["result"]["status"], "PENDENTE")
                     self.assertEqual(saved["audio_path"], audio_existente)
+                    pending_link = os.path.join(songs, "_pendentes", os.path.basename(audio_existente))
+                    self.assertTrue(os.path.islink(pending_link))
+                    self.assertEqual(os.path.realpath(pending_link), os.path.realpath(audio_existente))
                 finally:
                     state.close()
 
-    def test_baixar_musica_pendente_nao_cria_pastas_ou_links_de_artista(self):
+    def test_baixar_musica_pendente_fica_no_artista_principal_com_link_de_revisao(self):
         with tempfile.TemporaryDirectory() as temp:
             songs = os.path.join(temp, "songs")
             resultado = {"status": "PENDENTE", "metadata": {"title": "Título"}}
@@ -366,11 +390,35 @@ class PltubeTests(unittest.TestCase):
                     hybrid_result=resultado,
                 )
 
-            self.assertIn(os.path.join("songs", "_pendentes"), path)
+            self.assertIn(os.path.join("songs", "Artista Um"), path)
             self.assertTrue(os.path.isfile(path))
-            self.assertFalse(os.path.exists(os.path.join(songs, "Artista Um")))
+            self.assertTrue(os.path.islink(os.path.join(songs, "_pendentes", os.path.basename(path))))
+            self.assertEqual(
+                os.path.realpath(os.path.join(songs, "_pendentes", os.path.basename(path))),
+                os.path.realpath(path),
+            )
             self.assertFalse(os.path.exists(os.path.join(songs, "Artista Dois")))
             tagger.assert_called_once_with(path, resultado)
+
+    def test_pendente_sem_artista_usa_pasta_de_fallback_e_link_de_revisao(self):
+        with tempfile.TemporaryDirectory() as temp:
+            songs = os.path.join(temp, "songs")
+            with (
+                patch.multiple(
+                    pltube, SONGS_DIR=songs, ARTIST_LINKS=False,
+                    yt_dlp=type("FakeModule", (), {"YoutubeDL": FakeYoutubeDL}),
+                ),
+                patch.object(pltube, "aplicar_tags_hibridas", return_value=True),
+            ):
+                path = pltube.baixar_musica(
+                    "https://youtube.com/watch?v=abc123", [], "Título", "abc123",
+                    hybrid_result={"status": "PENDENTE", "metadata": {"title": "Título"}},
+                )
+            self.assertTrue(path.endswith(os.path.join("Artista Desconhecido", "Título [abc123].mp3")))
+            self.assertTrue(os.path.isfile(path))
+            pending_link = os.path.join(songs, "_pendentes", os.path.basename(path))
+            self.assertTrue(os.path.islink(pending_link))
+            self.assertEqual(os.path.realpath(pending_link), os.path.realpath(path))
 
     def test_modo_hibrido_nao_promove_uploader_a_artista(self):
         class YoutubeDLSemArtista(FakeYoutubeDL):
@@ -420,6 +468,27 @@ class PltubeTests(unittest.TestCase):
         self.assertEqual(status[0].text, ["PENDENTE"])
         self.assertIn("podem estar incorretos", note[0].text[0])
         self.assertEqual(str(tags["TIT2"]), "Título provisório")
+
+    def test_metadados_locais_leem_isrc_do_frame_id3_tsrc(self):
+        try:
+            from mutagen.id3 import ID3, TSRC
+        except ImportError:
+            self.skipTest("mutagen não está instalado neste ambiente")
+
+        with tempfile.TemporaryDirectory() as temp:
+            songs = os.path.join(temp, "songs")
+            pasta_artista = os.path.join(songs, "Artista A")
+            os.makedirs(pasta_artista)
+            path = os.path.join(pasta_artista, "Faixa [abc123].mp3")
+            tags = ID3()
+            tags.add(TSRC(encoding=3, text=["us-aaa-99-00001"]))
+            tags.save(path)
+
+            with patch.object(pltube, "SONGS_DIR", songs):
+                meta = pltube.metadados_de_arquivo_local(path, "abc123")
+
+        self.assertEqual(meta["isrc"], "USAAA9900001")
+        self.assertEqual(meta["local_metadata"]["isrc"], "USAAA9900001")
 
     def test_retoma_apos_linha_checkpointada_sem_reconsultar_a_anterior(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -608,14 +677,146 @@ class PltubeTests(unittest.TestCase):
 
         dormir.assert_not_called()
 
+    def test_csv_e_caminho_de_audio_sao_salvos_relativos_nos_dois_bancos(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = os.path.join(temp, "csvs")
+            songs = os.path.join(temp, "songs")
+            pasta_artist = os.path.join(songs, "Artista A")
+            os.makedirs(base)
+            os.makedirs(pasta_artist)
+            audio = os.path.join(pasta_artist, "musica1.mp3")
+            with open(audio, "wb") as handle:
+                handle.write(b"audio")
+            csv_path = os.path.join(base, "lista.csv")
+            downloads = os.path.join(base, "sql", "downloads.sqlite3")
+            metadata_db = os.path.join(base, "sql", "musicas.sqlite3")
+            estado = pltube.abrir_banco_estado(downloads, metadata_db)
+            try:
+                with patch.object(pltube, "BASE_DIR", base):
+                    meta = {
+                        "id": "abc123", "title": "Musica 1", "artists": ["Artista A"],
+                        "duration": 100,
+                    }
+                    pltube.salvar_video_cache(
+                        estado, "youtube:abc123", "https://youtube.com/watch?v=abc123",
+                        "complete", meta, audio,
+                    )
+                    pltube.registrar_job_download(
+                        estado, "youtube:abc123", "https://youtube.com/watch?v=abc123",
+                        "CONCLUIDO", video_id="abc123", path=audio,
+                    )
+                    pltube.salvar_item_playlist(
+                        estado, csv_path, 0, "youtube:abc123", meta, audio,
+                    )
+                    video = estado.execute(
+                        "SELECT path FROM video_cache WHERE video_key = ?", ("youtube:abc123",)
+                    ).fetchone()[0]
+                    job = estado.execute(
+                        "SELECT audio_path FROM download_jobs WHERE video_key = ?",
+                        ("youtube:abc123",),
+                    ).fetchone()[0]
+                    item = estado.execute(
+                        "SELECT csv_path, path FROM playlist_items WHERE video_key = ?",
+                        ("youtube:abc123",),
+                    ).fetchone()
+                    esperado = os.path.relpath(audio, start=os.path.dirname(downloads))
+                    self.assertEqual(video, esperado)
+                    self.assertEqual(job, esperado)
+                    self.assertEqual(item["csv_path"], "lista.csv")
+                    self.assertEqual(item["path"], esperado)
+                    self.assertEqual(pltube.ler_video_cache(estado, "youtube:abc123")["path"], audio)
+                    self.assertEqual(
+                        pltube.listar_itens_playlist(estado, "lista.csv")[0][3], audio
+                    )
+            finally:
+                estado.close()
+
+    def test_migra_banco_legado_sem_apaga_lo_e_converte_caminho(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = os.path.join(temp, "csvs")
+            pasta_sql = os.path.join(base, "sql")
+            audio = os.path.join(temp, "songs", "Artista A", "faixa.mp3")
+            os.makedirs(pasta_sql)
+            os.makedirs(os.path.dirname(audio))
+            with open(audio, "wb") as handle:
+                handle.write(b"audio")
+            legado = os.path.join(base, "pltube_state.sqlite3")
+            antigo = sqlite3.connect(legado)
+            antigo.executescript(
+                """CREATE TABLE video_cache (
+                    video_key TEXT PRIMARY KEY, video_id TEXT, source_url TEXT,
+                    status TEXT, title TEXT, artists_json TEXT, duration REAL,
+                    path TEXT, error TEXT);
+                    CREATE TABLE metadata_resolution (
+                    video_key TEXT PRIMARY KEY, video_id TEXT, status TEXT,
+                    result_json TEXT, audio_path TEXT, updated_at TEXT);"""
+            )
+            resultado = {
+                "video_id": "abc123", "status": "PENDENTE",
+                "metadata": {"id": "abc123", "title": "Faixa", "artists": ["Artista A"]},
+                "source_youtube": {"title": "Faixa", "artists": ["Artista A"]},
+            }
+            antigo.execute(
+                "INSERT INTO video_cache VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("youtube:abc123", "abc123", "https://youtube.com/watch?v=abc123",
+                 "complete", "Faixa", '["Artista A"]', 90, audio, ""),
+            )
+            antigo.execute(
+                "INSERT INTO metadata_resolution VALUES (?, ?, ?, ?, ?, ?)",
+                ("youtube:abc123", "abc123", "PENDENTE",
+                 json.dumps(resultado), audio, "2026-01-01"),
+            )
+            antigo.commit()
+            antigo.close()
+
+            estado = pltube.abrir_banco_estado(
+                os.path.join(pasta_sql, "downloads.sqlite3"),
+                os.path.join(pasta_sql, "musicas.sqlite3"),
+            )
+            try:
+                with patch.object(pltube, "BASE_DIR", base):
+                    migracao = pltube.migrar_banco_legado(estado, legado)
+                    novamente = pltube.migrar_banco_legado(estado, legado)
+                self.assertEqual(migracao, {"downloads": 1, "playlists": 0, "metadados": 1})
+                self.assertEqual(novamente, {"downloads": 0, "playlists": 0, "metadados": 0})
+                job = estado.execute(
+                    "SELECT audio_path FROM download_jobs WHERE video_key = ?",
+                    ("youtube:abc123",),
+                ).fetchone()
+                self.assertFalse(os.path.isabs(job["audio_path"]))
+                self.assertEqual(
+                    pltube.carregar_resolucao(estado, "youtube:abc123")["audio_path"], audio
+                )
+                self.assertTrue(os.path.isfile(legado))
+            finally:
+                estado.close()
+
     def test_parametro_esperar_bloqueio_aparece_no_parser(self):
         args = pltube.criar_parser().parse_args(
-            ["--esperar-bloqueio", "--modelo-hibrido", "--reprocess", "--state-file", "cache.sqlite3"]
+            [
+                "--esperar-bloqueio", "--modelo-hibrido", "--reprocess",
+                "--state-file", "cache.sqlite3", "--exigir-isrc",
+                "--exigir-artista-musicbrainz",
+            ]
         )
         self.assertTrue(args.esperar_bloqueio)
         self.assertTrue(args.modelo_hibrido)
         self.assertTrue(args.reprocess)
+        self.assertTrue(args.exigir_isrc)
+        self.assertTrue(args.exigir_artista_musicbrainz)
         self.assertEqual(args.state_file, "cache.sqlite3")
+
+    def test_base_dir_sem_pastas_de_saida_usa_diretorio_dos_csvs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            antigos = (pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR)
+            try:
+                args = pltube.criar_parser().parse_args(["--BaseDir", temp])
+                pltube.verificar_diretorios(args)
+                self.assertEqual(pltube.BASE_DIR, os.path.abspath(temp))
+                self.assertEqual(pltube.SONGS_DIR, os.path.abspath(temp))
+                self.assertEqual(pltube.PLAYLISTS_DIR, os.path.abspath(temp))
+            finally:
+                pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR = antigos
 
 
 if __name__ == "__main__":

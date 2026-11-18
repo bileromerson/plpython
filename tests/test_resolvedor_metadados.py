@@ -412,6 +412,100 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(resolver.normalize_isrc("us-aaa-99-00001"), "USAAA9900001")
         self.assertEqual(resolver.normalize_isrc("not-an-isrc"), "")
 
+    def test_isrc_local_e_fonte_separada_e_pode_ser_exigido_com_confirmacao(self):
+        client = FakeMusicBrainz()
+        resultado = resolver.resolver_metadados(
+            "vid-local-isrc",
+            {"title": "Canção", "artists": ["Artista"]},
+            musicbrainz_client=client,
+            campos_obrigatorios=("isrc",),
+            exigir_isrc=True,
+            dados_locais={"isrc": "us-aaa-99-00001"},
+        )
+
+        self.assertEqual(client.isrc_calls, [("USAAA9900001", 10)])
+        self.assertEqual(resultado.metadata["isrc"], "USAAA9900001")
+        self.assertEqual(resultado.provenance["isrc"], "local")
+        self.assertEqual(resultado.source_youtube["isrc"], "")
+        self.assertEqual(resultado.source_local["isrc"], "USAAA9900001")
+        self.assertIn(
+            "ISRC recuperado das tags locais do MP3",
+            resultado.diagnostics_by_source["local"],
+        )
+        self.assertIn(
+            "ISRC disponível, mas não confirmado pelo MusicBrainz ou por revisão manual",
+            resultado.pending_reasons,
+        )
+
+    def test_match_musicbrainz_pode_confirmar_isrc_vindo_de_tag_local(self):
+        candidate = {
+            "recording_id": "abababab-abab-4bab-8bab-abababababab",
+            "title": "Canção",
+            "artists": ["Artista"],
+            "isrcs": ["USAAA9900001"],
+            "duration": 180,
+            "releases": [
+                {"id": "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", "title": "Álbum"}
+            ],
+        }
+        client = FakeMusicBrainz(by_isrc=[candidate])
+        resultado = resolver.resolver_metadados(
+            "vid-local-confirmed",
+            {"title": "Canção", "artists": ["Artista"]},
+            musicbrainz_client=client,
+            dados_locais={"isrc": "USAAA9900001"},
+        )
+
+        self.assertEqual(resultado.provenance["isrc"], "musicbrainz")
+        self.assertEqual(resultado.metadata["isrc"], "USAAA9900001")
+
+    def test_isrc_ausente_vira_pendencia_e_diagnostico_por_fonte(self):
+        resultado = resolver.resolver_metadados(
+            "vid-sem-isrc",
+            {"title": "Canção", "artists": ["Artista"]},
+            musicbrainz_client=FakeMusicBrainz(),
+            campos_obrigatorios=("isrc",),
+        )
+
+        self.assertEqual(resultado.status, "PENDENTE")
+        self.assertIn("campo obrigatório ausente: isrc", resultado.pending_reasons)
+        self.assertIn(
+            "yt-dlp/YouTube não forneceu um ISRC válido",
+            resultado.diagnostics_by_source["youtube"],
+        )
+        self.assertIn(
+            "MusicBrainz não encontrou uma correspondência para ISRC/título/artista",
+            resultado.diagnostics_by_source["musicbrainz"],
+        )
+
+    def test_correspondencia_sem_artista_nao_confirma_artista_do_video(self):
+        candidate = {
+            "recording_id": "abababab-abab-4bab-8bab-abababababab",
+            "title": "Canção",
+            "artists": [],
+            "isrcs": ["USAAA9900001"],
+            "duration": 180,
+            "releases": [],
+        }
+        resultado = resolver.resolver_metadados(
+            "vid-sem-artista-mb",
+            {"title": "Canção", "artists": ["Crédito incerto"], "isrc": "USAAA9900001"},
+            musicbrainz_client=FakeMusicBrainz(by_isrc=[candidate]),
+            exigir_artista_musicbrainz=True,
+        )
+
+        self.assertEqual(resultado.provenance["artists"], "youtube")
+        self.assertEqual(resultado.status, "PENDENTE")
+        self.assertIn(
+            "artista informado somente pelo vídeo, sem confirmação independente",
+            resultado.pending_reasons,
+        )
+        self.assertIn(
+            "artista não confirmado pelo MusicBrainz ou por revisão manual",
+            resultado.pending_reasons,
+        )
+        self.assertTrue(resultado.diagnostics_by_source["musicbrainz"])
+
 
 if __name__ == "__main__":
     unittest.main()
