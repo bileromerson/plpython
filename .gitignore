@@ -213,3 +213,5 @@ csvs/
 pltube_state.sqlite3
 pltube_state.sqlite3-wal
 pltube_state.sqlite3-shm
+metadados_pendentes.csv
+.metadados-pendentes-*.csv

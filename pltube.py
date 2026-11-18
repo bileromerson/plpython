@@ -9,9 +9,12 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+from resolvedor_metadados import MusicBrainzClient, resolver_metadados
 
 try:
     import yt_dlp
@@ -26,6 +29,9 @@ LOG_FILE = os.path.join(BASE_DIR, "Logs.txt")
 ROW = 2
 ARTIST_LINKS = False
 ESPERAR_BLOQUEIO = False
+MODELO_HIBRIDO = False
+MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
+RESOLVER_CACHE: dict[str, Any] = {}
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
 ESPERA_MAXIMA_SEGUNDOS = 600
@@ -33,7 +39,8 @@ ESPERA_MAXIMA_SEGUNDOS = 600
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """Aplica as opções de diretório e de coluna informadas na linha de comando."""
-    global BASE_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS, ESPERAR_BLOQUEIO
+    global BASE_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
+    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
     SONGS_DIR = os.path.normpath(os.path.join(BASE_DIR, args.songs_dir or "songs"))
@@ -44,6 +51,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     ROW = args.row
     ARTIST_LINKS = args.artist_links
     ESPERAR_BLOQUEIO = args.esperar_bloqueio
+    MODELO_HIBRIDO = args.modelo_hibrido
 
 
 def registrar_erro(url: str, motivo: str, playlist: str = "") -> None:
@@ -188,9 +196,10 @@ def indexar_musicas_locais() -> dict[str, str]:
         for nome in nomes:
             caminho = os.path.join(pasta, nome)
             resultado = padrao.search(nome)
-            if resultado and os.path.isfile(caminho):
+            if resultado and os.path.isfile(caminho) and not os.path.islink(caminho):
                 arquivos.append((caminho, resultado.group(1)))
-    # Se há cópia central, prefira-a às entradas simbólicas por artista.
+    # Compatibilidade com a estrutura antiga; na nova, o arquivo físico fica
+    # na pasta do artista principal e as entradas de colaboradores são links.
     arquivos.sort(key=lambda item: (os.path.basename(os.path.dirname(item[0])) != "_library", item[0]))
     for caminho, video_id in arquivos:
         encontrados.setdefault(video_id, caminho)
@@ -260,6 +269,14 @@ def abrir_banco_estado(path: str) -> sqlite3.Connection:
             path TEXT NOT NULL,
             PRIMARY KEY (csv_path, row_index)
         );
+        CREATE TABLE IF NOT EXISTS metadata_resolution (
+            video_key TEXT PRIMARY KEY,
+            video_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            audio_path TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     conexao.commit()
@@ -328,7 +345,223 @@ def listar_itens_playlist(conexao: sqlite3.Connection, csv_path: str):
     return [(row["title"], row["artist"], row["duration"], row["path"]) for row in rows]
 
 
-def normalizar_artistas(info: dict[str, Any]) -> list[str]:
+def carregar_resolucao(
+    conexao: sqlite3.Connection, video_key: str
+) -> dict[str, Any] | None:
+    linha = conexao.execute(
+        "SELECT result_json, audio_path FROM metadata_resolution WHERE video_key = ?",
+        (video_key,),
+    ).fetchone()
+    if not linha:
+        return None
+    try:
+        return {
+            "result": json.loads(linha["result_json"]),
+            "audio_path": linha["audio_path"],
+        }
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def salvar_resolucao(
+    conexao: sqlite3.Connection,
+    video_key: str,
+    resultado: dict[str, Any],
+    audio_path: str = "",
+) -> None:
+    conexao.execute(
+        """INSERT INTO metadata_resolution
+        (video_key, video_id, status, result_json, audio_path, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(video_key) DO UPDATE SET
+        video_id=excluded.video_id, status=excluded.status,
+        result_json=excluded.result_json,
+        audio_path=CASE WHEN excluded.audio_path != '' THEN excluded.audio_path
+                        ELSE metadata_resolution.audio_path END,
+        updated_at=CURRENT_TIMESTAMP""",
+        (
+            video_key,
+            str(resultado.get("video_id") or ""),
+            str(resultado.get("status") or "PENDENTE"),
+            json.dumps(resultado, ensure_ascii=False),
+            os.path.abspath(audio_path) if audio_path else "",
+        ),
+    )
+    conexao.commit()
+
+
+def meta_do_resultado_hibrido(resultado: dict[str, Any]) -> dict[str, Any]:
+    """Converte o resultado do resolver para os campos usados pelo downloader."""
+    campos = resultado.get("metadata") or {}
+    origem = resultado.get("source_youtube") or {}
+    artistas = campos.get("artists") or origem.get("artists") or []
+    if isinstance(artistas, str):
+        artistas = [artistas]
+    artistas = [str(item).strip() for item in artistas if str(item).strip()]
+    titulo = (
+        campos.get("title") or origem.get("title") or campos.get("id")
+        or "faixa-sem-titulo"
+    )
+    return {
+        "title": str(titulo),
+        "artists": artistas,
+        "artist": artistas[0] if artistas else "",
+        "duration": campos.get("duration") or origem.get("duration") or 0,
+        "id": str(campos.get("id") or resultado.get("video_id") or ""),
+        "album": str(campos.get("album") or ""),
+        "isrc": str(campos.get("isrc") or ""),
+        "uploader": str(campos.get("uploader") or origem.get("uploader") or ""),
+        "thumbnail": str(campos.get("thumbnail_url") or origem.get("thumbnail_url") or ""),
+        "hybrid_status": str(resultado.get("status") or "PENDENTE"),
+    }
+
+
+def resolver_meta_hibrido(meta: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    resultado = resolver_metadados(
+        str(meta.get("id") or ""),
+        meta,
+        cache=RESOLVER_CACHE,
+        musicbrainz_client=MUSICBRAINZ_CLIENT,
+    ).to_dict()
+    return meta_do_resultado_hibrido(resultado), resultado
+
+
+def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
+    """Grava tags canônicas e um marcador ID3 explícito de metadados pendentes."""
+    try:
+        from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TIT2, TPE1, TSRC, TXXX
+
+        try:
+            tags = ID3(audio_path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        metadata = resultado.get("metadata") or {}
+        for frame_id in ("TIT2", "TPE1", "TALB", "TSRC"):
+            tags.delall(frame_id)
+        if metadata.get("title"):
+            tags.add(TIT2(encoding=3, text=[str(metadata["title"])]))
+        artists = metadata.get("artists") or []
+        if isinstance(artists, str):
+            artists = [artists]
+        if artists:
+            tags.add(TPE1(encoding=3, text=[str(item) for item in artists]))
+        if metadata.get("album"):
+            tags.add(TALB(encoding=3, text=[str(metadata["album"])]))
+        if metadata.get("isrc"):
+            tags.add(TSRC(encoding=3, text=[str(metadata["isrc"])]))
+
+        valores = {
+            "PLTUBE_METADATA_STATUS": str(resultado.get("status") or "PENDENTE"),
+            "PLTUBE_METADATA_NOTE": (
+                "Metadados provisórios; podem estar incorretos. Consulte metadados_pendentes.csv."
+                if resultado.get("status") == "PENDENTE"
+                else "Metadados confirmados pelo modelo híbrido."
+            ),
+            "PLTUBE_METADATA_PROVENANCE": json.dumps(
+                resultado.get("provenance") or {}, ensure_ascii=False
+            ),
+            "PLTUBE_METADATA_CONFIDENCE": json.dumps(
+                resultado.get("confidence") or {}, ensure_ascii=False
+            ),
+            "PLTUBE_METADATA_REVIEW": " | ".join(
+                resultado.get("pending_reasons") or []
+            ),
+        }
+        for desc, value in valores.items():
+            tags.delall(f"TXXX:{desc}")
+            tags.add(TXXX(encoding=3, desc=desc, text=[value]))
+        tags.save(audio_path)
+        return True
+    except Exception as exc:
+        registrar_erro(audio_path, f"Não foi possível gravar tags do modelo híbrido: {exc}")
+        return False
+
+
+def exportar_metadados_pendentes(
+    conexao: sqlite3.Connection, destino: str | None = None
+) -> str:
+    """Exporta um CSV legível com uma linha por vídeo ainda sem comprovação clara."""
+    destino = destino or os.path.join(BASE_DIR, "metadados_pendentes.csv")
+    os.makedirs(os.path.dirname(os.path.abspath(destino)), exist_ok=True)
+    colunas = [
+        "video_id", "url_youtube", "arquivo_audio", "playlists", "status",
+        "titulo_youtube", "artistas_youtube", "canal_youtube", "album_youtube", "titulo_usado",
+        "artistas_usados", "album_sugerido", "isrc_youtube", "isrc_sugerido",
+        "thumbnail_youtube", "capa_sugerida", "motivos_pendencia", "diagnosticos",
+        "candidatos_musicbrainz", "proveniencia", "confianca",
+    ]
+    linhas = conexao.execute(
+        """SELECT r.video_key, r.video_id, r.result_json, r.audio_path,
+                  v.source_url
+           FROM metadata_resolution r
+           LEFT JOIN video_cache v ON v.video_key = r.video_key
+           WHERE r.status = 'PENDENTE'
+           ORDER BY r.video_id, r.video_key"""
+    ).fetchall()
+    fd, temporario = tempfile.mkstemp(
+        prefix=".metadados-pendentes-",
+        suffix=".csv",
+        dir=os.path.dirname(os.path.abspath(destino)),
+    )
+    os.close(fd)
+    try:
+        with open(temporario, "w", encoding="utf-8-sig", newline="") as arquivo:
+            writer = csv.DictWriter(arquivo, fieldnames=colunas)
+            writer.writeheader()
+            for linha in linhas:
+                try:
+                    resultado = json.loads(linha["result_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    resultado = {}
+                metadata = resultado.get("metadata") or {}
+                origem = resultado.get("source_youtube") or {}
+                video_key = linha["video_key"]
+                playlists = [
+                    os.path.splitext(os.path.basename(row[0]))[0]
+                    for row in conexao.execute(
+                        "SELECT DISTINCT csv_path FROM playlist_items WHERE video_key = ?",
+                        (video_key,),
+                    ).fetchall()
+                ]
+                writer.writerow({
+                    "video_id": linha["video_id"],
+                    "url_youtube": linha["source_url"] or "",
+                    "arquivo_audio": linha["audio_path"] or "",
+                    "playlists": " | ".join(playlists),
+                    "status": resultado.get("status") or "PENDENTE",
+                    "titulo_youtube": origem.get("title") or "",
+                    "artistas_youtube": " | ".join(origem.get("artists") or []),
+                    "canal_youtube": origem.get("uploader") or "",
+                    "album_youtube": origem.get("album") or "",
+                    "titulo_usado": metadata.get("title") or "",
+                    "artistas_usados": " | ".join(metadata.get("artists") or []),
+                    "album_sugerido": metadata.get("album") or "",
+                    "isrc_youtube": origem.get("isrc") or "",
+                    "isrc_sugerido": metadata.get("isrc") or "",
+                    "thumbnail_youtube": origem.get("thumbnail_url") or "",
+                    "capa_sugerida": metadata.get("cover_url") or "",
+                    "motivos_pendencia": " | ".join(resultado.get("pending_reasons") or []),
+                    "diagnosticos": " | ".join(resultado.get("diagnostics") or []),
+                    "candidatos_musicbrainz": json.dumps(
+                        resultado.get("candidates") or [], ensure_ascii=False
+                    ),
+                    "proveniencia": json.dumps(
+                        resultado.get("provenance") or {}, ensure_ascii=False
+                    ),
+                    "confianca": json.dumps(
+                        resultado.get("confidence") or {}, ensure_ascii=False
+                    ),
+                })
+        os.replace(temporario, destino)
+    finally:
+        if os.path.exists(temporario):
+            os.unlink(temporario)
+    return destino
+
+
+def normalizar_artistas(
+    info: dict[str, Any], permitir_uploader: bool = True
+) -> list[str]:
     """Obtém os artistas dos metadados do YouTube, preservando nomes de bandas."""
     candidatos = info.get("artists")
     if isinstance(candidatos, str):
@@ -339,6 +572,8 @@ def normalizar_artistas(info: dict[str, Any]) -> list[str]:
 
     artistas: list[str] = []
     for candidato in candidatos:
+        if isinstance(candidato, dict):
+            candidato = candidato.get("name") or candidato.get("artist") or ""
         if not isinstance(candidato, str):
             continue
         # Só separa créditos explícitos de participação; não divide nomes de bandas
@@ -349,7 +584,7 @@ def normalizar_artistas(info: dict[str, Any]) -> list[str]:
             if nome and nome.casefold() not in {item.casefold() for item in artistas}:
                 artistas.append(nome)
 
-    if not artistas:
+    if not artistas and permitir_uploader:
         for chave in ("uploader", "channel", "creator"):
             nome = info.get(chave)
             if isinstance(nome, str) and nome.strip():
@@ -385,15 +620,22 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
 
     def montar_metadados() -> dict[str, Any]:
         info = obter_info()
-        artistas = normalizar_artistas(info)
-        if not artistas:
+        artistas = normalizar_artistas(
+            info, permitir_uploader=not MODELO_HIBRIDO
+        )
+        if not artistas and not MODELO_HIBRIDO:
             raise RuntimeError("O YouTube não informou o artista deste vídeo.")
         return {
             "title": info.get("title") or info.get("id") or "musica-sem-titulo",
             "artists": artistas,
-            "artist": artistas[0],
+            "artist": artistas[0] if artistas else "",
             "duration": info.get("duration") or 0,
             "id": str(info.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:11]),
+            "album": info.get("album") or info.get("release") or "",
+            "isrc": info.get("isrc") or info.get("isrcs") or "",
+            "uploader": info.get("uploader") or info.get("channel") or "",
+            "thumbnail": info.get("thumbnail") or "",
+            "thumbnails": info.get("thumbnails") or [],
         }
 
     try:
@@ -445,8 +687,9 @@ def baixar_musica(
     title: str,
     video_id: str = "",
     csv_file: str = "",
+    hybrid_result: dict[str, Any] | None = None,
 ) -> str | None:
-    """Baixa a música uma vez e, opcionalmente, cria links nas pastas de artistas."""
+    """Salva no artista principal e, se ativado, liga colaboradores ao mesmo MP3."""
     if yt_dlp is None:
         registrar_erro(url, "Dependência yt-dlp não instalada", csv_file)
         print("Instale as dependências com: pip install -r requirements.txt")
@@ -462,10 +705,14 @@ def baixar_musica(
     safe_id = nome_seguro(video_id, "sem-id") if video_id else "sem-id"
     filename = f"{safe_title} [{safe_id}].mp3"
 
-    if ARTIST_LINKS:
-        pasta_download = os.path.join(SONGS_DIR, "_library")
-    else:
-        pasta_download = os.path.join(SONGS_DIR, nome_seguro(artists[0], "Artista Desconhecido"))
+    # A primeira posição dos créditos é tratada como artista principal.
+    # Não há pasta central de MP3: o próprio arquivo fica nesta pasta.
+    pendente = bool(hybrid_result and hybrid_result.get("status") == "PENDENTE")
+    pasta_download = (
+        os.path.join(SONGS_DIR, "_pendentes")
+        if pendente
+        else os.path.join(SONGS_DIR, nome_seguro(artists[0], "Artista Desconhecido"))
+    )
     os.makedirs(pasta_download, exist_ok=True)
 
     filepath_mp3 = os.path.join(pasta_download, filename)
@@ -508,7 +755,9 @@ def baixar_musica(
         if not os.path.isfile(filepath_mp3):
             return None
 
-    if ARTIST_LINKS:
+    if hybrid_result:
+        aplicar_tags_hibridas(filepath_mp3, hybrid_result)
+    if ARTIST_LINKS and not pendente:
         for nome in artists:
             criar_link_artista(filepath_mp3, nome)
     return filepath_mp3
@@ -616,14 +865,30 @@ def processar_csv(
             start_row = int(salvo["next_row"])
             if salvo["complete"]:
                 itens_salvos = listar_itens_playlist(estado, state_key)
-                if all(os.path.isfile(item[3]) for item in itens_salvos):
+                precisa_resolver_hibrido = False
+                if MODELO_HIBRIDO:
+                    sem_resolucao = estado.execute(
+                        """SELECT 1 FROM playlist_items p
+                           LEFT JOIN metadata_resolution r ON r.video_key = p.video_key
+                           WHERE p.csv_path = ? AND r.video_key IS NULL LIMIT 1""",
+                        (state_key,),
+                    ).fetchone()
+                    precisa_resolver_hibrido = bool(sem_resolucao)
+                if (
+                    all(os.path.isfile(item[3]) for item in itens_salvos)
+                    and not precisa_resolver_hibrido
+                ):
                     print(f"CSV já concluído; usando cache local sem reler: {csv_file}")
                     escrever_playlist(m3u_path, itens_salvos, csv_file, append)
                     return True
-                print(f"Um arquivo do cache não existe; retomando o CSV: {csv_file}")
-                estado.execute("DELETE FROM playlist_items WHERE csv_path = ?", (state_key,))
-                progresso_csv(estado, state_key, assinatura, 0, False, 0)
-                start_row = 0
+                if precisa_resolver_hibrido:
+                    print(f"Aplicando o modelo híbrido a itens já baixados de {csv_file}")
+                    start_row = 0
+                else:
+                    print(f"Um arquivo do cache não existe; retomando o CSV: {csv_file}")
+                    estado.execute("DELETE FROM playlist_items WHERE csv_path = ?", (state_key,))
+                    progresso_csv(estado, state_key, assinatura, 0, False, 0)
+                    start_row = 0
 
     try:
         with open(csv_path, "r", encoding="utf-8-sig", newline="") as arquivo:
@@ -641,6 +906,7 @@ def processar_csv(
                 url = ""
                 meta: dict[str, Any] | None = None
                 music_path: str | None = None
+                hybrid_result: dict[str, Any] | None = None
 
                 if not row or not (-len(row) <= ROW < len(row)):
                     registrar_erro("", f"Coluna {ROW} ausente na linha {numero_linha}", csv_file)
@@ -691,27 +957,80 @@ def processar_csv(
                                             error="Não foi possível obter os metadados",
                                         )
 
-                                if meta:
-                                    try:
+                            if meta and MODELO_HIBRIDO:
+                                salvo_hibrido = (
+                                    carregar_resolucao(estado, video_key)
+                                    if estado is not None else None
+                                )
+                                tentar_novamente = bool(
+                                    salvo_hibrido and reprocess
+                                    and salvo_hibrido["result"].get("status") == "PENDENTE"
+                                )
+                                if salvo_hibrido and not tentar_novamente:
+                                    hybrid_result = salvo_hibrido["result"]
+                                    meta = meta_do_resultado_hibrido(hybrid_result)
+                                    caminho_salvo = salvo_hibrido.get("audio_path")
+                                    if (
+                                        not music_path and caminho_salvo
+                                        and os.path.isfile(caminho_salvo)
+                                    ):
+                                        music_path = caminho_salvo
+                                else:
+                                    meta, hybrid_result = resolver_meta_hibrido(meta)
+                                    if estado is not None:
+                                        salvar_resolucao(estado, video_key, hybrid_result)
+
+                            if meta and music_path and hybrid_result:
+                                aplicar_tags_hibridas(music_path, hybrid_result)
+
+                            if (
+                                meta and hybrid_result and MODELO_HIBRIDO
+                                and estado is not None and not music_path
+                            ):
+                                salvar_video_cache(
+                                    estado, video_key, url, "metadata", meta
+                                )
+                                estado.commit()
+
+                            if meta and not music_path:
+                                try:
+                                    if MODELO_HIBRIDO:
+                                        music_path = baixar_musica(
+                                            url, meta["artists"], meta["title"], meta["id"],
+                                            csv_file, hybrid_result=hybrid_result,
+                                        )
+                                    else:
+                                        if estado is not None:
+                                            salvar_video_cache(
+                                                estado, video_key, url, "metadata", meta
+                                            )
+                                            estado.commit()
                                         music_path = baixar_musica(
                                             url, meta["artists"], meta["title"], meta["id"], csv_file
                                         )
-                                    except BloqueioTemporarioYouTube:
-                                        print("Interrompendo esta playlist para evitar novas requisições durante o bloqueio.")
-                                        bloqueado = True
-                                        break
+                                except BloqueioTemporarioYouTube:
+                                    print("Interrompendo esta playlist para evitar novas requisições durante o bloqueio.")
+                                    bloqueado = True
+                                    break
 
-                                    if music_path and estado is not None:
-                                        salvar_video_cache(
-                                            estado, video_key, url, "complete", meta, music_path
-                                        )
-                                    elif not music_path and estado is not None:
-                                        salvar_video_cache(
-                                            estado, video_key, url, "failed", meta,
-                                            error="Não foi possível baixar o áudio",
-                                        )
+                            if music_path and estado is not None and meta:
+                                salvar_video_cache(
+                                    estado, video_key, url, "complete", meta, music_path
+                                )
+                                if hybrid_result:
+                                    salvar_resolucao(
+                                        estado, video_key, hybrid_result, music_path
+                                    )
+                            elif not music_path and estado is not None and meta:
+                                salvar_video_cache(
+                                    estado, video_key, url, "failed", meta,
+                                    error="Não foi possível baixar o áudio",
+                                )
 
-                        if music_path and meta and ARTIST_LINKS:
+                        if (
+                            music_path and meta and ARTIST_LINKS
+                            and not (hybrid_result and hybrid_result.get("status") == "PENDENTE")
+                        ):
                             for artista in meta["artists"]:
                                 criar_link_artista(music_path, artista)
                         if music_path and meta and estado is not None:
@@ -756,11 +1075,16 @@ def criar_parser() -> argparse.ArgumentParser:
     parser.add_argument("-a", "--append", action="store_true", help="Acrescenta itens à playlist sem repetir caminhos existentes")
     parser.add_argument(
         "--artist-links", "--links-artista", dest="artist_links", action="store_true",
-        help="Ativa links sem duplicação: armazena cada música em songs/_library e cria links nas pastas de todos os artistas",
+        help="Guarda o MP3 na pasta do primeiro artista e cria links para os demais artistas, sem duplicar o áudio",
     )
     parser.add_argument(
         "--esperar-bloqueio", "--wait-on-limit", dest="esperar_bloqueio", action="store_true",
         help="Espera e tenta novamente em bloqueios temporários do YouTube (backoff: 30s até 10min; até 6 tentativas)",
+    )
+    parser.add_argument(
+        "--modelo-hibrido",
+        action="store_true",
+        help="Consulta o MusicBrainz, prioriza correspondências confiáveis e registra metadados provisórios para revisão",
     )
     parser.add_argument(
         "--state-file", default="pltube_state.sqlite3",
@@ -768,15 +1092,18 @@ def criar_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reprocess", action="store_true",
-        help="Relê o CSV usando o cache local; também tenta novamente itens que falharam antes",
+        help="Relê o CSV, tenta itens que falharam e reconsulta pendências MusicBrainz sem refazer downloads concluídos",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    global MUSICBRAINZ_CLIENT, RESOLVER_CACHE
     parser = criar_parser()
     args = parser.parse_args(argv)
     verificar_diretorios(args)
+    MUSICBRAINZ_CLIENT = MusicBrainzClient() if MODELO_HIBRIDO else None
+    RESOLVER_CACHE = {}
     criar_diretorios()
 
     if args.lista:
@@ -815,6 +1142,18 @@ def main(argv: list[str] | None = None) -> int:
         print("\nInterrompido. O progresso confirmado foi salvo; execute o mesmo comando para retomar.")
         return 130
     finally:
+        if MODELO_HIBRIDO:
+            try:
+                caminho_pendencias = exportar_metadados_pendentes(estado)
+                total_pendentes = estado.execute(
+                    "SELECT COUNT(*) FROM metadata_resolution WHERE status = 'PENDENTE'"
+                ).fetchone()[0]
+                print(
+                    f"Fila de metadados pendentes: {total_pendentes} faixa(s) em "
+                    f"{caminho_pendencias}"
+                )
+            except (OSError, sqlite3.Error) as exc:
+                print(f"Não foi possível exportar a fila de metadados pendentes: {exc}")
         estado.close()
     return 0
 
