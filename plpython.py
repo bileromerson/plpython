@@ -39,9 +39,10 @@ def _oculto(parser: argparse.ArgumentParser, *nomes: str, **kwargs) -> None:
 
 def _opcoes_pastas(p: argparse.ArgumentParser, *, com_csv: bool) -> None:
     if com_csv:
-        p.add_argument("-c", "--csv-dir", dest="base_dir", metavar="PASTA",
-                       help="onde estão os CSVs (padrão: pasta atual); não muda onde o resto é salvo")
-        _oculto(p, "-b", "--base-dir", "--BaseDir", dest="base_dir")
+        p.add_argument("-c", "--csvfile", dest="base_dir", metavar="CAMINHO",
+                       help="pasta com os CSVs ou um .csv específico (padrão: pasta atual); "
+                            "só serve para ler os CSVs, o resto fica na pasta atual")
+        _oculto(p, "-b", "--csv-dir", "--base-dir", "--BaseDir", dest="base_dir")
     p.add_argument("-s", "--songs-dir", dest="songs_dir", metavar="PASTA",
                    help="pasta das músicas (padrão: ./songs)")
     p.add_argument("-p", "--playlist-dir", dest="playlist_dir", metavar="PASTA",
@@ -62,7 +63,7 @@ def _opcoes_bancos(p: argparse.ArgumentParser) -> argparse._ArgumentGroup:
 
 def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("csvs", nargs="*", metavar="CSV",
-                   help="CSVs específicos; sem eles, processa todos os .csv da --csv-dir")
+                   help="CSVs específicos; sem eles, processa todos os .csv de --csvfile")
     _opcoes_pastas(p, com_csv=True)
     p.add_argument("-u", "--url-column", dest="row", type=int, default=2, metavar="N",
                    help="coluna da URL, começando em 0; aceita negativo (padrão: 2 = videoUrl)")
@@ -188,9 +189,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if comando in ("download", "update"):
         import pltube
-        # CSVs passados no comando são relativos à pasta atual, não à --csv-dir.
+        # CSVs passados no comando são relativos à pasta atual, não a --csvfile.
         args.lista = [os.path.abspath(c) for c in list(args.csvs) + list(args.csvs_extra or [])]
         args.work_dir = os.getcwd()
+        if args.base_dir and os.path.isfile(args.base_dir):
+            # --csvfile apontando para um arquivo: processa só ele.
+            args.lista.append(os.path.abspath(args.base_dir))
+            args.base_dir = os.path.dirname(os.path.abspath(args.base_dir))
         if comando == "update":
             args.reprocess = True
         usa_opcao_hibrida = (

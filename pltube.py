@@ -46,13 +46,19 @@ ESPERA_MAXIMA_SEGUNDOS = 600
 
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
-    """BaseDir aponta para CSVs; diretórios de saída têm caminhos independentes."""
+    """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
     global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC
     global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
-    BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
-    # BaseDir só indica onde estão os CSVs; songs/, playlists/, sql/, log e
+    caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
+    if os.path.isfile(caminho_csv):
+        # --csvfile apontando para um arquivo: processa só ele.
+        if not getattr(args, "lista", None):
+            args.lista = caminho_csv
+        caminho_csv = os.path.dirname(caminho_csv)
+    BASE_DIR = caminho_csv
+    # --csvfile só indica onde estão os CSVs; songs/, playlists/, sql/, log e
     # planilha ficam na pasta de onde o programa foi iniciado.
     WORK_DIR = os.path.abspath(getattr(args, "work_dir", None) or os.getcwd())
     padrao_musicas = os.path.join(WORK_DIR, "songs")
@@ -1567,7 +1573,11 @@ def atualizar(csv_file: str) -> None:
 
 def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Baixa músicas de CSVs do YouTube e cria playlists M3U")
-    parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta dos CSVs (padrão: diretório atual); o resto fica na pasta atual")
+    parser.add_argument(
+        "-c", "--csvfile", dest="base_dir", metavar="CAMINHO",
+        help="Pasta com os CSVs ou um .csv específico (padrão: diretório atual); o resto fica na pasta atual",
+    )
+    parser.add_argument("-b", "--BaseDir", dest="base_dir", help=argparse.SUPPRESS)
     parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas (padrão: ./songs)")
     parser.add_argument(
         "-p", "--PlaylistDir", dest="playlist_dir",
@@ -1593,15 +1603,15 @@ def criar_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--downloads-db", "--state-file", dest="state_file",
         default=os.path.join("sql", "downloads.sqlite3"),
-        help="SQLite de downloads/retomada (padrão: <BaseDir>/sql/downloads.sqlite3; --state-file é alias)",
+        help="SQLite de downloads/retomada (padrão: ./sql/downloads.sqlite3; --state-file é alias)",
     )
     parser.add_argument(
         "--metadata-db", default=os.path.join("sql", "musicas.sqlite3"),
-        help="SQLite de metadados musicais (padrão: <BaseDir>/sql/musicas.sqlite3)",
+        help="SQLite de metadados musicais (padrão: ./sql/musicas.sqlite3)",
     )
     parser.add_argument(
         "--legacy-state-file", default="pltube_state.sqlite3",
-        help="Banco antigo único a migrar, se existir (padrão: <BaseDir>/pltube_state.sqlite3)",
+        help="Banco antigo único a migrar, se existir (padrão: ./pltube_state.sqlite3 ou junto dos CSVs)",
     )
     parser.add_argument(
         "--exigir-isrc", action="store_true",

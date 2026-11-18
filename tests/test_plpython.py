@@ -41,7 +41,7 @@ class PlpythonCliTests(unittest.TestCase):
             os.chdir(temp)
             try:
                 os.makedirs("listas")
-                args = self._capturar("pltube", ["download", "--csv-dir", "listas"])
+                args = self._capturar("pltube", ["download", "--csvfile", "listas"])
                 pltube.verificar_diretorios(args)
                 real = os.path.realpath(temp)
                 self.assertEqual(os.path.realpath(pltube.BASE_DIR), os.path.join(real, "listas"))
@@ -51,6 +51,15 @@ class PlpythonCliTests(unittest.TestCase):
             finally:
                 os.chdir(antigo)
                 pltube.verificar_diretorios(pltube.criar_parser().parse_args([]))
+
+    def test_csvfile_aceita_arquivo_unico(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            arquivo = os.path.join(temp, "Alone.csv")
+            open(arquivo, "w").close()
+            args = self._capturar("pltube", ["download", "--csvfile", arquivo])
+            self.assertEqual(args.lista, [arquivo])
+            self.assertEqual(args.base_dir, temp)
 
     def test_update_forca_retry(self):
         args = self._capturar("pltube", ["update", "-c", "x"])

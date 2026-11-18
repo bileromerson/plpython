@@ -17,13 +17,13 @@ Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts a
 | `revert` (`reverter`) | desfaz o layout legado `songs/_library` | `reverter_biblioteca.py` |
 | `legacy-centralize` | cria o layout legado (não recomendado) | `sincronizar_biblioteca.py` |
 
-Pastas: rodando `plpython.py` em `~/Musica`, o padrão é `~/Musica/songs`, `~/Musica/playlists` e `~/Musica/sql`, mesmo usando `--csv-dir ./outra/pasta`. CSVs passados direto no comando (`download a.csv`) são relativos à pasta atual.
+Pastas: rodando `plpython.py` em `~/Musica`, o padrão é `~/Musica/songs`, `~/Musica/playlists` e `~/Musica/sql`, mesmo usando `--csvfile ./outra/pasta`. CSVs passados direto no comando (`download a.csv`) são relativos à pasta atual.
 
 Opções renomeadas (os nomes antigos ainda são aceitos, mas não aparecem na ajuda):
 
 | Novo | Antigo | Motivo |
 |---|---|---|
-| `-c/--csv-dir` | `--BaseDir` | agora só indica onde estão os CSVs; `songs/`, `playlists/`, `sql/`, `Logs.txt` e a planilha ficam na pasta de onde você roda o comando |
+| `-c/--csvfile` | `--BaseDir`, `--csvfile` | indica a pasta dos CSVs ou um `.csv` específico, e só isso; `songs/`, `playlists/`, `sql/`, `Logs.txt` e a planilha ficam na pasta de onde você roda o comando |
 | `-s/--songs-dir`, `-p/--playlist-dir`, `-l/--log-file` | `--SongsDir`, `--PlaylistDir`, `--LogFile` | padronizar em minúsculas com hífen |
 | CSVs posicionais: `download a.csv b.csv` | `--lista a.csv` | aceita vários CSVs |
 | `-u/--url-column` | `--row` | nome descreve o que é |
@@ -109,7 +109,7 @@ python plpython.py download -c ./csvs --hybrid --no-review
 
 `pltube.py` lê um ou vários CSVs com URLs de vídeos do YouTube, usa o `yt-dlp` para obter as informações disponíveis e baixar o áudio em MP3. O FFmpeg é usado para conversão e para incorporar ao arquivo as tags e a thumbnail recebidas no processamento.
 
-`--BaseDir` (ou `--csv-dir` no `plpython.py`) aponta somente para a pasta dos CSVs. `songs/`, `playlists/`, `sql/`, `Logs.txt` e `metadados_pendentes.csv` ficam na pasta de onde você roda o programa. `--SongsDir`/`-s` e `--PlaylistDir`/`-p` escolhem outros nomes ou caminhos; caminhos relativos são resolvidos a partir do diretório atual.
+`--csvfile` (`-c`; o antigo `--BaseDir` ainda funciona) aponta somente para a pasta dos CSVs ou para um `.csv` específico. `songs/`, `playlists/`, `sql/`, `Logs.txt` e `metadados_pendentes.csv` ficam na pasta de onde você roda o programa. `--SongsDir`/`-s` e `--PlaylistDir`/`-p` escolhem outros nomes ou caminhos; caminhos relativos são resolvidos a partir do diretório atual.
 
 O downloader cria uma playlist M3U para cada CSV. A coluna da URL pode ser indicada com `--row` (índice começando em zero; o padrão é `2`). A opção `--append` acrescenta itens à M3U existente sem duplicar caminhos já listados.
 
@@ -139,10 +139,10 @@ Exemplos:
 
 ```bash
 # Processar todos os CSVs da pasta indicada
-python pltube.py --BaseDir ./csvs
+python pltube.py --csvfile ./csvs
 
 # Usar pastas de saída específicas; sem estas opções, ficam em ./songs e ./playlists
-python pltube.py --BaseDir ./csvs --SongsDir /media/Musicas --PlaylistDir ./m3u
+python pltube.py --csvfile ./csvs --SongsDir /media/Musicas --PlaylistDir ./m3u
 
 # Processar uma playlist específica, usando a coluna de URLs de índice 2
 python pltube.py --lista csvs/Alone.csv --row 2
@@ -154,16 +154,16 @@ python pltube.py --lista csvs/Alone.csv --artist-links --append
 python pltube.py --lista csvs/Alone.csv --reprocess --esperar-bloqueio
 
 # Ativar o modelo híbrido e gerar/atualizar a fila de metadados pendentes
-python pltube.py --BaseDir ./csvs --modelo-hibrido
+python pltube.py --csvfile ./csvs --modelo-hibrido
 
 # Exigir ISRC e confirmação do artista pelo MusicBrainz ou revisão manual
-python pltube.py --BaseDir ./csvs --modelo-hibrido --exigir-isrc --exigir-artista-musicbrainz
+python pltube.py --csvfile ./csvs --modelo-hibrido --exigir-isrc --exigir-artista-musicbrainz
 
 # Simular as edições selecionadas na planilha
-python aplicar_metadados.py --BaseDir ./csvs
+python aplicar_metadados.py
 
 # Aplicar as edições depois de revisar o plano
-python aplicar_metadados.py --BaseDir ./csvs --apply
+python aplicar_metadados.py --apply
 ```
 
 ### Consulta de playlist do Spotify
