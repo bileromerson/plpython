@@ -52,11 +52,10 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
-    # plpython.py informa work_dir (pasta de onde foi iniciado); o pltube.py antigo
-    # mantém tudo junto da pasta dos CSVs.
-    work_dir = getattr(args, "work_dir", None)
-    WORK_DIR = os.path.abspath(work_dir) if work_dir else BASE_DIR
-    padrao_musicas = os.path.join(WORK_DIR, "songs") if work_dir else BASE_DIR
+    # BaseDir só indica onde estão os CSVs; songs/, playlists/, sql/, log e
+    # planilha ficam na pasta de onde o programa foi iniciado.
+    WORK_DIR = os.path.abspath(getattr(args, "work_dir", None) or os.getcwd())
+    padrao_musicas = os.path.join(WORK_DIR, "songs")
     SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else padrao_musicas
     PLAYLISTS_DIR = (
         os.path.abspath(args.playlist_dir)
@@ -1568,11 +1567,11 @@ def atualizar(csv_file: str) -> None:
 
 def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Baixa músicas de CSVs do YouTube e cria playlists M3U")
-    parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta dos CSVs (padrão: diretório atual)")
-    parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas; sem esta opção, usa diretamente BaseDir")
+    parser.add_argument("-b", "--BaseDir", dest="base_dir", help="Pasta dos CSVs (padrão: diretório atual); o resto fica na pasta atual")
+    parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas (padrão: ./songs)")
     parser.add_argument(
         "-p", "--PlaylistDir", dest="playlist_dir",
-        help="Pasta das M3Us (padrão: <BaseDir>/playlists)",
+        help="Pasta das M3Us (padrão: ./playlists)",
     )
     parser.add_argument("-l", "--LogFile", dest="log_file", help="Arquivo de log (padrão: Logs.txt)")
     parser.add_argument("--lista", help="Caminho de um CSV específico; sem esta opção, processa os CSVs da pasta base")

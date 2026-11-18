@@ -109,7 +109,7 @@ python plpython.py download -c ./csvs --hybrid --no-review
 
 `pltube.py` lê um ou vários CSVs com URLs de vídeos do YouTube, usa o `yt-dlp` para obter as informações disponíveis e baixar o áudio em MP3. O FFmpeg é usado para conversão e para incorporar ao arquivo as tags e a thumbnail recebidas no processamento.
 
-`--BaseDir` aponta somente para a pasta dos CSVs. Se `--SongsDir` não for informado, os MP3s organizados em pastas de artistas ficam diretamente nessa pasta. Se `--PlaylistDir` não for informado, as M3Us ficam em `BaseDir/playlists/`. Quando essas opções forem informadas, o caminho especificado é usado sem acrescentar automaticamente `songs/` ou `playlists/`; caminhos relativos são resolvidos a partir do diretório atual.
+`--BaseDir` (ou `--csv-dir` no `plpython.py`) aponta somente para a pasta dos CSVs. `songs/`, `playlists/`, `sql/`, `Logs.txt` e `metadados_pendentes.csv` ficam na pasta de onde você roda o programa. `--SongsDir`/`-s` e `--PlaylistDir`/`-p` escolhem outros nomes ou caminhos; caminhos relativos são resolvidos a partir do diretório atual.
 
 O downloader cria uma playlist M3U para cada CSV. A coluna da URL pode ser indicada com `--row` (índice começando em zero; o padrão é `2`). A opção `--append` acrescenta itens à M3U existente sem duplicar caminhos já listados.
 
@@ -119,7 +119,7 @@ Essa mudança vale para os novos downloads e para arquivos que o downloader cons
 
 O downloader mantém uma linha de estado para cada download desde que a URL é processada, além do progresso por CSV; retoma itens interrompidos e reutiliza o mesmo vídeo quando ele aparece em outra playlist. `--reprocess` tenta novamente itens que falharam e, no modo híbrido, reconsulta pendências do MusicBrainz sem baixar novamente faixas concluídas nem refazer a consulta ao YouTube. Para bloqueios temporários, `--esperar-bloqueio` ativa tentativas com espera progressiva; se o bloqueio continuar, a execução para antes de consultar outros CSVs.
 
-O estado é separado em dois arquivos no diretório `<BaseDir>/sql/`: `downloads.sqlite3` acompanha fila, tentativas, erros, progresso dos CSVs e relações com playlists; `musicas.sqlite3` guarda uma tabela pesquisável por faixa com título, artistas, álbum, ISRC, dados de origem, proveniência, confiança e diagnósticos, além dos resultados completos do modo híbrido. O MP3 não é embutido no banco. Caminhos de áudio e de CSV são relativos para que a estrutura possa ser movida preservando sua relação com a pasta `sql/`. O banco antigo único `pltube_state.sqlite3`, se existir, é migrado uma vez sem ser apagado. Os arquivos podem ser personalizados com `--downloads-db` e `--metadata-db`.
+O estado é separado em dois arquivos no diretório `sql/` (na pasta atual): `downloads.sqlite3` acompanha fila, tentativas, erros, progresso dos CSVs e relações com playlists; `musicas.sqlite3` guarda uma tabela pesquisável por faixa com título, artistas, álbum, ISRC, dados de origem, proveniência, confiança e diagnósticos, além dos resultados completos do modo híbrido. O MP3 não é embutido no banco. Caminhos de áudio e de CSV são relativos para que a estrutura possa ser movida preservando sua relação com a pasta `sql/`. O banco antigo único `pltube_state.sqlite3`, se existir, é migrado uma vez sem ser apagado. Os arquivos podem ser personalizados com `--downloads-db` e `--metadata-db`.
 
 ### Modelo híbrido de metadados (opcional)
 
@@ -141,7 +141,7 @@ Exemplos:
 # Processar todos os CSVs da pasta indicada
 python pltube.py --BaseDir ./csvs
 
-# Usar pastas de saída específicas; sem estas opções, áudio e M3Us ficam junto dos CSVs
+# Usar pastas de saída específicas; sem estas opções, ficam em ./songs e ./playlists
 python pltube.py --BaseDir ./csvs --SongsDir /media/Musicas --PlaylistDir ./m3u
 
 # Processar uma playlist específica, usando a coluna de URLs de índice 2

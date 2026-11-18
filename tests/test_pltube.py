@@ -813,11 +813,13 @@ class PltubeTests(unittest.TestCase):
                 args = pltube.criar_parser().parse_args(["--BaseDir", temp])
                 pltube.verificar_diretorios(args)
                 self.assertEqual(pltube.BASE_DIR, os.path.abspath(temp))
-                self.assertEqual(pltube.SONGS_DIR, os.path.abspath(temp))
-                pasta_playlists = os.path.join(os.path.abspath(temp), "playlists")
+                # BaseDir só muda os CSVs; o resto fica na pasta atual.
+                self.assertEqual(pltube.SONGS_DIR, os.path.join(os.getcwd(), "songs"))
+                pasta_playlists = os.path.join(os.getcwd(), "playlists")
                 self.assertEqual(pltube.PLAYLISTS_DIR, pasta_playlists)
+                pltube.PLAYLISTS_DIR = os.path.join(temp, "playlists")
                 pltube.criar_diretorios()
-                self.assertTrue(os.path.isdir(pasta_playlists))
+                self.assertTrue(os.path.isdir(pltube.PLAYLISTS_DIR))
             finally:
                 pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR = antigos
 

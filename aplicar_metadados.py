@@ -343,7 +343,7 @@ def executar(args: argparse.Namespace) -> int:
     arquivo_csv = _caminho(base, args.arquivo)
     arquivo_estado = _caminho(base, args.downloads_db)
     arquivo_metadados = _caminho(base, args.metadata_db)
-    padrao_musicas = os.path.join(base, "songs") if getattr(args, "work_dir", None) else base
+    padrao_musicas = os.path.join(base, "songs")
     pasta_musicas = os.path.abspath(args.songs_dir) if args.songs_dir else padrao_musicas
     pasta_playlists = (
         os.path.abspath(args.playlist_dir)
