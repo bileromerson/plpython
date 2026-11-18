@@ -24,7 +24,8 @@ except ImportError:  # Mantém helpers e testes importáveis sem a dependência 
     yt_dlp = None
 
 
-BASE_DIR = os.getcwd()
+BASE_DIR = os.getcwd()  # pasta dos CSVs
+WORK_DIR = BASE_DIR  # onde ficam sql/, Logs.txt e a planilha
 SONGS_DIR = BASE_DIR
 PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 LOG_FILE = os.path.join(BASE_DIR, "Logs.txt")
@@ -46,18 +47,23 @@ ESPERA_MAXIMA_SEGUNDOS = 600
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """BaseDir aponta para CSVs; diretórios de saída têm caminhos independentes."""
-    global BASE_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
+    global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
     global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC
     global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
-    SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else BASE_DIR
+    # plpython.py informa work_dir (pasta de onde foi iniciado); o pltube.py antigo
+    # mantém tudo junto da pasta dos CSVs.
+    work_dir = getattr(args, "work_dir", None)
+    WORK_DIR = os.path.abspath(work_dir) if work_dir else BASE_DIR
+    padrao_musicas = os.path.join(WORK_DIR, "songs") if work_dir else BASE_DIR
+    SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else padrao_musicas
     PLAYLISTS_DIR = (
         os.path.abspath(args.playlist_dir)
         if args.playlist_dir
-        else os.path.join(BASE_DIR, "playlists")
+        else os.path.join(WORK_DIR, "playlists")
     )
-    LOG_FILE = os.path.abspath(args.log_file) if args.log_file else os.path.join(BASE_DIR, "Logs.txt")
+    LOG_FILE = os.path.abspath(args.log_file) if args.log_file else os.path.join(WORK_DIR, "Logs.txt")
     ROW = args.row
     ARTIST_LINKS = args.artist_links
     ESPERAR_BLOQUEIO = args.esperar_bloqueio
@@ -856,7 +862,7 @@ def exportar_metadados_pendentes(
     conexao: sqlite3.Connection, destino: str | None = None
 ) -> str:
     """Exporta um CSV legível com uma linha por vídeo ainda sem comprovação clara."""
-    destino = destino or os.path.join(BASE_DIR, "metadados_pendentes.csv")
+    destino = destino or os.path.join(WORK_DIR, "metadados_pendentes.csv")
     os.makedirs(os.path.dirname(os.path.abspath(destino)), exist_ok=True)
     colunas_editaveis = [
         "aplicar", "usar_titulo", "titulo_final", "usar_artistas", "artistas_finais",
@@ -1644,13 +1650,13 @@ def executar(args: argparse.Namespace) -> int:
 
     state_path = args.state_file
     if not os.path.isabs(state_path):
-        state_path = os.path.join(BASE_DIR, state_path)
+        state_path = os.path.join(WORK_DIR, state_path)
     metadata_path = args.metadata_db
     if not os.path.isabs(metadata_path):
-        metadata_path = os.path.join(BASE_DIR, metadata_path)
+        metadata_path = os.path.join(WORK_DIR, metadata_path)
     legacy_path = args.legacy_state_file
     if legacy_path and not os.path.isabs(legacy_path):
-        legacy_path = os.path.join(BASE_DIR, legacy_path)
+        legacy_path = os.path.join(WORK_DIR, legacy_path)
     try:
         estado = abrir_banco_estado(state_path, metadata_path)
         migracao = migrar_banco_legado(estado, legacy_path) if legacy_path else {}

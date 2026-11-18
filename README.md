@@ -17,13 +17,16 @@ Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts a
 | `revert` (`reverter`) | desfaz o layout legado `songs/_library` | `reverter_biblioteca.py` |
 | `legacy-centralize` | cria o layout legado (não recomendado) | `sincronizar_biblioteca.py` |
 
+Pastas: rodando `plpython.py` em `~/Musica`, o padrão é `~/Musica/songs`, `~/Musica/playlists` e `~/Musica/sql`, mesmo usando `--csv-dir ./outra/pasta`. CSVs passados direto no comando (`download a.csv`) são relativos à pasta atual.
+
 Opções renomeadas (os nomes antigos ainda são aceitos, mas não aparecem na ajuda):
 
 | Novo | Antigo | Motivo |
 |---|---|---|
-| `-b/--base-dir`, `-s/--songs-dir`, `-p/--playlist-dir`, `-l/--log-file` | `--BaseDir`, `--SongsDir`, `--PlaylistDir`, `--LogFile` | padronizar em minúsculas com hífen |
+| `-c/--csv-dir` | `--BaseDir` | agora só indica onde estão os CSVs; `songs/`, `playlists/`, `sql/`, `Logs.txt` e a planilha ficam na pasta de onde você roda o comando |
+| `-s/--songs-dir`, `-p/--playlist-dir`, `-l/--log-file` | `--SongsDir`, `--PlaylistDir`, `--LogFile` | padronizar em minúsculas com hífen |
 | CSVs posicionais: `download a.csv b.csv` | `--lista a.csv` | aceita vários CSVs |
-| `-c/--url-column` | `--row` | nome descreve o que é |
+| `-u/--url-column` | `--row` | nome descreve o que é |
 | `--retry` (já embutido em `update`) | `--reprocess` | mais claro |
 | `--wait-on-limit` | `--esperar-bloqueio` | tinha dois nomes |
 | `--hybrid` | `--modelo-hibrido` | curto |
@@ -40,23 +43,23 @@ python plpython.py -h                     # lista os comandos
 python plpython.py download -h            # opções de um comando
 
 # Baixar todos os CSVs da pasta; músicas e M3Us em pastas próprias
-python plpython.py download -b ./csvs -s /media/Musicas -p ./m3u
+python plpython.py download -c ./csvs -s /media/Musicas -p ./m3u
 
 # Só duas playlists, linkando colaboradores e acrescentando às M3Us
 python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links --append
 
 # CSV cuja URL está na última coluna
-python plpython.py download minha.csv -c -1
+python plpython.py download minha.csv -u -1
 
 # Conferir no MusicBrainz exigindo ISRC (ativa --hybrid automaticamente)
-python plpython.py download -b ./csvs --require-isrc
+python plpython.py download -c ./csvs --require-isrc
 
 # Atualizar depois de editar CSVs ou após falhas, esperando se o YouTube bloquear
-python plpython.py update -b ./csvs --wait-on-limit
+python plpython.py update -c ./csvs --wait-on-limit
 
 # Revisar metadados: simular e depois gravar
-python plpython.py metadata -b ./csvs
-python plpython.py metadata -b ./csvs --apply
+python plpython.py metadata
+python plpython.py metadata --apply
 
 # Spotify (precisa das variáveis SPOTIFY_*)
 python plpython.py spotify "https://open.spotify.com/playlist/ID"
@@ -94,10 +97,10 @@ SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status 
 Se estiver certo, marque `aplicar=sim` e `confirmar_manual=sim` na planilha e rode `plpython.py metadata --apply`. `update` reconsulta automaticamente as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou.
 
 ```bash
-python plpython.py download -b ./csvs --hybrid
-python plpython.py download -b ./csvs --prefer-db
-python plpython.py download -b ./csvs --hybrid --review diff
-python plpython.py download -b ./csvs --hybrid --no-review
+python plpython.py download -c ./csvs --hybrid
+python plpython.py download -c ./csvs --prefer-db
+python plpython.py download -c ./csvs --hybrid --review diff
+python plpython.py download -c ./csvs --hybrid --no-review
 ```
 
 ## O que já funciona

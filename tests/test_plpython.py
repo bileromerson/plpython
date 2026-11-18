@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -12,11 +13,12 @@ class PlpythonCliTests(unittest.TestCase):
 
     def test_download_com_varios_csvs_e_opcoes(self):
         args = self._capturar("pltube", [
-            "download", "a.csv", "b.csv", "-b", "base", "-c", "-1",
+            "download", "a.csv", "b.csv", "-c", "base", "-u", "-1",
             "--artist-links", "--wait-on-limit", "--require-isrc",
         ])
-        self.assertEqual(args.lista, ["a.csv", "b.csv"])
+        self.assertEqual(args.lista, [os.path.abspath("a.csv"), os.path.abspath("b.csv")])
         self.assertEqual(args.base_dir, "base")
+        self.assertEqual(args.work_dir, os.getcwd())
         self.assertEqual(args.row, -1)
         self.assertTrue(args.artist_links and args.esperar_bloqueio)
         self.assertTrue(args.modelo_hibrido)  # implícito por --require-isrc
@@ -31,8 +33,27 @@ class PlpythonCliTests(unittest.TestCase):
         args = self._capturar("pltube", ["download", "--review", "diff"])
         self.assertEqual(args.revisar, "diff")
 
+    def test_csv_dir_nao_muda_pasta_de_trabalho(self):
+        import tempfile
+        import pltube
+        with tempfile.TemporaryDirectory() as temp:
+            antigo = os.getcwd()
+            os.chdir(temp)
+            try:
+                os.makedirs("listas")
+                args = self._capturar("pltube", ["download", "--csv-dir", "listas"])
+                pltube.verificar_diretorios(args)
+                real = os.path.realpath(temp)
+                self.assertEqual(os.path.realpath(pltube.BASE_DIR), os.path.join(real, "listas"))
+                self.assertEqual(os.path.realpath(pltube.SONGS_DIR), os.path.join(real, "songs"))
+                self.assertEqual(os.path.realpath(pltube.PLAYLISTS_DIR), os.path.join(real, "playlists"))
+                self.assertEqual(os.path.realpath(pltube.WORK_DIR), real)
+            finally:
+                os.chdir(antigo)
+                pltube.verificar_diretorios(pltube.criar_parser().parse_args([]))
+
     def test_update_forca_retry(self):
-        args = self._capturar("pltube", ["update", "-b", "x"])
+        args = self._capturar("pltube", ["update", "-c", "x"])
         self.assertTrue(args.reprocess)
         self.assertEqual(args.lista, [])
 
@@ -41,7 +62,7 @@ class PlpythonCliTests(unittest.TestCase):
             "baixar", "--BaseDir", "x", "--lista", "y.csv", "--row", "3",
             "--modelo-hibrido", "--state-file", "s.db",
         ])
-        self.assertEqual((args.base_dir, args.lista, args.row), ("x", ["y.csv"], 3))
+        self.assertEqual((args.base_dir, args.lista, args.row), ("x", [os.path.abspath("y.csv")], 3))
         self.assertTrue(args.modelo_hibrido)
         self.assertEqual(args.state_file, "s.db")
 

@@ -19,14 +19,14 @@ import sys
 
 EXEMPLOS = """\
 exemplos:
-  python plpython.py download -b ./csvs
+  python plpython.py download -c ./csvs
   python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links
-  python plpython.py download -b ./csvs -s /media/Musicas -p ./m3u --hybrid
-  python plpython.py update -b ./csvs --wait-on-limit
-  python plpython.py download -b ./csvs --hybrid --prefer-db
-  python plpython.py download -b ./csvs --hybrid --review diff
-  python plpython.py metadata -b ./csvs            # simula
-  python plpython.py metadata -b ./csvs --apply    # grava
+  python plpython.py download -c ./csvs -s /media/Musicas -p ./m3u --hybrid
+  python plpython.py update -c ./csvs --wait-on-limit
+  python plpython.py download -c ./csvs --hybrid --prefer-db
+  python plpython.py download -c ./csvs --hybrid --review diff
+  python plpython.py metadata            # simula
+  python plpython.py metadata --apply    # grava
   python plpython.py spotify https://open.spotify.com/playlist/ID
   python plpython.py revert -s songs --apply
 """
@@ -37,13 +37,15 @@ def _oculto(parser: argparse.ArgumentParser, *nomes: str, **kwargs) -> None:
     parser.add_argument(*nomes, help=argparse.SUPPRESS, **kwargs)
 
 
-def _opcoes_pastas(p: argparse.ArgumentParser, base_help: str) -> None:
-    p.add_argument("-b", "--base-dir", dest="base_dir", metavar="PASTA", help=base_help)
+def _opcoes_pastas(p: argparse.ArgumentParser, *, com_csv: bool) -> None:
+    if com_csv:
+        p.add_argument("-c", "--csv-dir", dest="base_dir", metavar="PASTA",
+                       help="onde estão os CSVs (padrão: pasta atual); não muda onde o resto é salvo")
+        _oculto(p, "-b", "--base-dir", "--BaseDir", dest="base_dir")
     p.add_argument("-s", "--songs-dir", dest="songs_dir", metavar="PASTA",
-                   help="pasta das músicas (padrão: a própria base)")
+                   help="pasta das músicas (padrão: ./songs)")
     p.add_argument("-p", "--playlist-dir", dest="playlist_dir", metavar="PASTA",
-                   help="pasta das M3Us (padrão: <base>/playlists)")
-    _oculto(p, "--BaseDir", dest="base_dir")
+                   help="pasta das M3Us (padrão: ./playlists)")
     _oculto(p, "--SongsDir", dest="songs_dir")
     _oculto(p, "--PlaylistDir", dest="playlist_dir")
 
@@ -51,18 +53,18 @@ def _opcoes_pastas(p: argparse.ArgumentParser, base_help: str) -> None:
 def _opcoes_bancos(p: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     g = p.add_argument_group("bancos SQLite (avançado)")
     g.add_argument("--downloads-db", default=os.path.join("sql", "downloads.sqlite3"), metavar="ARQ",
-                   help="fila/progresso de downloads (padrão: <base>/sql/downloads.sqlite3)")
+                   help="fila/progresso de downloads (padrão: ./sql/downloads.sqlite3)")
     g.add_argument("--metadata-db", default=os.path.join("sql", "musicas.sqlite3"), metavar="ARQ",
-                   help="metadados das faixas (padrão: <base>/sql/musicas.sqlite3)")
+                   help="metadados das faixas (padrão: ./sql/musicas.sqlite3)")
     _oculto(p, "--state-file", dest="downloads_db")
     return g
 
 
 def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("csvs", nargs="*", metavar="CSV",
-                   help="CSVs específicos; sem eles, processa todos os .csv da pasta base")
-    _opcoes_pastas(p, "pasta dos CSVs (padrão: diretório atual)")
-    p.add_argument("-c", "--url-column", dest="row", type=int, default=2, metavar="N",
+                   help="CSVs específicos; sem eles, processa todos os .csv da --csv-dir")
+    _opcoes_pastas(p, com_csv=True)
+    p.add_argument("-u", "--url-column", dest="row", type=int, default=2, metavar="N",
                    help="coluna da URL, começando em 0; aceita negativo (padrão: 2 = videoUrl)")
     _oculto(p, "--row", dest="row", type=int)
     _oculto(p, "--lista", dest="csvs_extra", action="append")
@@ -78,7 +80,7 @@ def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
                        help="tenta de novo itens que falharam (o comando update já faz isso)")
         _oculto(p, "--reprocess", dest="reprocess", action="store_true")
     p.add_argument("-l", "--log-file", dest="log_file", metavar="ARQ",
-                   help="arquivo de log de erros (padrão: <base>/Logs.txt)")
+                   help="arquivo de log de erros (padrão: ./Logs.txt)")
 
     h = p.add_argument_group("metadados MusicBrainz (modelo híbrido)")
     h.add_argument("--hybrid", dest="modelo_hibrido", action="store_true",
@@ -102,7 +104,7 @@ def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
 
     g = _opcoes_bancos(p)
     g.add_argument("--legacy-db", dest="legacy_state_file", default="pltube_state.sqlite3", metavar="ARQ",
-                   help="banco antigo único a migrar se existir (padrão: <base>/pltube_state.sqlite3)")
+                   help="banco antigo único a migrar se existir (padrão: ./pltube_state.sqlite3)")
 
 
 def criar_parser() -> argparse.ArgumentParser:
@@ -118,29 +120,29 @@ def criar_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("download", aliases=["baixar"], formatter_class=fmt,
                        help="baixa os CSVs e gera as M3Us",
                        epilog="exemplos:\n"
-                              "  plpython.py download -b ./csvs\n"
+                              "  plpython.py download -c ./csvs\n"
                               "  plpython.py download csvs/Alone.csv --artist-links --append\n"
-                              "  plpython.py download -b ./csvs --hybrid --require-isrc\n"
-                              "  plpython.py download -b ./csvs --prefer-db       # MusicBrainz vence divergências\n"
-                              "  plpython.py download -b ./csvs --hybrid --no-review")
+                              "  plpython.py download -c ./csvs --hybrid --require-isrc\n"
+                              "  plpython.py download -c ./csvs --prefer-db       # MusicBrainz vence divergências\n"
+                              "  plpython.py download -c ./csvs --hybrid --no-review")
     _opcoes_download(p, update=False)
 
     p = sub.add_parser("update", aliases=["atualizar"], formatter_class=fmt,
                        help="relê os CSVs, refaz falhas e pendências sem rebaixar o que já existe",
                        epilog="exemplos:\n"
-                              "  plpython.py update -b ./csvs\n"
+                              "  plpython.py update -c ./csvs\n"
                               "  plpython.py update csvs/Alone.csv --wait-on-limit --hybrid")
     _opcoes_download(p, update=True)
 
     p = sub.add_parser("metadata", aliases=["metadados"], formatter_class=fmt,
                        help="aplica as revisões de metadados_pendentes.csv (simula sem --apply)",
                        epilog="exemplos:\n"
-                              "  plpython.py metadata -b ./csvs\n"
-                              "  plpython.py metadata -b ./csvs --apply\n"
-                              "  plpython.py metadata -b ./csvs --sheet revisao.csv --apply")
-    _opcoes_pastas(p, "pasta base usada no download (padrão: diretório atual)")
+                              "  plpython.py metadata\n"
+                              "  plpython.py metadata --apply\n"
+                              "  plpython.py metadata --sheet revisao.csv --apply")
+    _opcoes_pastas(p, com_csv=False)
     p.add_argument("--sheet", dest="arquivo", default="metadados_pendentes.csv", metavar="CSV",
-                   help="planilha revisada (padrão: <base>/metadados_pendentes.csv)")
+                   help="planilha revisada (padrão: ./metadados_pendentes.csv)")
     _oculto(p, "--arquivo", dest="arquivo")
     p.add_argument("--apply", action="store_true", help="grava as mudanças; sem isto só simula")
     _opcoes_bancos(p)
@@ -186,7 +188,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if comando in ("download", "update"):
         import pltube
-        args.lista = list(args.csvs) + list(args.csvs_extra or [])
+        # CSVs passados no comando são relativos à pasta atual, não à --csv-dir.
+        args.lista = [os.path.abspath(c) for c in list(args.csvs) + list(args.csvs_extra or [])]
+        args.work_dir = os.getcwd()
         if comando == "update":
             args.reprocess = True
         usa_opcao_hibrida = (
@@ -201,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if comando == "metadata":
         import aplicar_metadados
-        args.base_dir = args.base_dir or os.getcwd()
+        args.base_dir = os.getcwd()
+        args.work_dir = args.base_dir
         return aplicar_metadados.executar(args)
 
     if comando == "spotify":
