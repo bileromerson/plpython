@@ -92,6 +92,140 @@ class PltubeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             spotify_playlist_viewer.extrair_playlist_id("https://open.spotify.com/album/123")
 
+    def test_mesmo_video_em_dois_csvs_usa_cache_sem_nova_consulta(self):
+        with tempfile.TemporaryDirectory() as temp:
+            urls = {
+                "um.csv": "https://www.youtube.com/watch?v=abc123&utm_source=a",
+                "dois.csv": "https://youtu.be/abc123?si=b",
+            }
+            for nome, url in urls.items():
+                with open(os.path.join(temp, nome), "w", encoding="utf-8", newline="") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(["id", "titulo", "url"])
+                    writer.writerow(["abc123", "Faixa cacheada", url])
+
+            songs, playlists = os.path.join(temp, "songs"), os.path.join(temp, "playlists")
+            state = None
+
+            def download(url, artists, title, video_id, csv_file):
+                folder = os.path.join(songs, artists[0])
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, f"{title} [{video_id}].mp3")
+                with open(path, "wb") as audio:
+                    audio.write(b"audio")
+                return path
+
+            meta = {"title": "Faixa cacheada", "artists": ["Artista"], "duration": 20, "id": "abc123"}
+            with patch.multiple(
+                pltube, BASE_DIR=temp, SONGS_DIR=songs, PLAYLISTS_DIR=playlists,
+                LOG_FILE=os.path.join(temp, "Logs.txt"), ROW=2, ARTIST_LINKS=False,
+            ):
+                pltube.criar_diretorios()
+                state = pltube.abrir_banco_estado(os.path.join(temp, "state.sqlite3"))
+                try:
+                    with (
+                        patch.object(pltube, "extrair_metadados", return_value=meta) as extract,
+                        patch.object(pltube, "baixar_musica", side_effect=download) as download_mock,
+                    ):
+                        pltube.processar_csv("um.csv", estado=state, indice_local={})
+                        pltube.processar_csv("dois.csv", estado=state, indice_local={})
+                        pltube.processar_csv("um.csv", estado=state, indice_local={})
+                    self.assertEqual(extract.call_count, 1)
+                    self.assertEqual(download_mock.call_count, 1)
+                    for nome in ("um", "dois"):
+                        with open(os.path.join(playlists, f"{nome}.m3u"), encoding="utf-8") as handle:
+                            self.assertIn("Faixa cacheada", handle.read())
+                finally:
+                    state.close()
+
+    def test_download_antigo_com_id_no_nome_e_reutilizado_offline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with open(os.path.join(temp, "lista.csv"), "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["id", "titulo", "url"])
+                writer.writerow(["abc123", "Faixa antiga", "https://youtube.com/watch?v=abc123"])
+
+            songs, playlists = os.path.join(temp, "songs"), os.path.join(temp, "playlists")
+            old_folder = os.path.join(songs, "Artista Antigo")
+            os.makedirs(old_folder)
+            old_path = os.path.join(old_folder, "Faixa antiga [abc123].mp3")
+            with open(old_path, "wb") as audio:
+                audio.write(b"already downloaded")
+
+            with patch.multiple(
+                pltube, BASE_DIR=temp, SONGS_DIR=songs, PLAYLISTS_DIR=playlists,
+                LOG_FILE=os.path.join(temp, "Logs.txt"), ROW=2, ARTIST_LINKS=False,
+            ):
+                pltube.criar_diretorios()
+                state = pltube.abrir_banco_estado(os.path.join(temp, "state.sqlite3"))
+                try:
+                    with (
+                        patch.object(pltube, "extrair_metadados") as extract,
+                        patch.object(pltube, "baixar_musica") as download,
+                    ):
+                        pltube.processar_csv(
+                            "lista.csv", estado=state,
+                            indice_local=pltube.indexar_musicas_locais(),
+                        )
+                    extract.assert_not_called()
+                    download.assert_not_called()
+                    with open(os.path.join(playlists, "lista.m3u"), encoding="utf-8") as handle:
+                        self.assertIn("Faixa antiga", handle.read())
+                finally:
+                    state.close()
+
+    def test_retoma_apos_linha_checkpointada_sem_reconsultar_a_anterior(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with open(os.path.join(temp, "lista.csv"), "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["id", "titulo", "url"])
+                writer.writerow(["1", "Primeira", "https://youtube.com/watch?v=abc123"])
+                writer.writerow(["2", "Segunda", "https://youtube.com/watch?v=def456"])
+
+            songs, playlists = os.path.join(temp, "songs"), os.path.join(temp, "playlists")
+            chamadas = {"abc123": 0, "def456": 0}
+            downloads = []
+
+            def extract(url, csv_file):
+                video_id = url.rsplit("=", 1)[1]
+                chamadas[video_id] += 1
+                if video_id == "def456" and chamadas[video_id] == 1:
+                    raise pltube.BloqueioTemporarioYouTube("bloqueio simulado")
+                return {"title": video_id, "artists": ["Artista"], "duration": 10, "id": video_id}
+
+            def download(url, artists, title, video_id, csv_file):
+                downloads.append(video_id)
+                folder = os.path.join(songs, artists[0])
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, f"{title} [{video_id}].mp3")
+                with open(path, "wb") as audio:
+                    audio.write(video_id.encode())
+                return path
+
+            with patch.multiple(
+                pltube, BASE_DIR=temp, SONGS_DIR=songs, PLAYLISTS_DIR=playlists,
+                LOG_FILE=os.path.join(temp, "Logs.txt"), ROW=2, ARTIST_LINKS=False,
+            ):
+                pltube.criar_diretorios()
+                state = pltube.abrir_banco_estado(os.path.join(temp, "state.sqlite3"))
+                try:
+                    with (
+                        patch.object(pltube, "extrair_metadados", side_effect=extract),
+                        patch.object(pltube, "baixar_musica", side_effect=download),
+                    ):
+                        self.assertFalse(
+                            pltube.processar_csv("lista.csv", estado=state, indice_local={})
+                        )
+                        self.assertTrue(
+                            pltube.processar_csv("lista.csv", estado=state, indice_local={})
+                        )
+                    self.assertEqual(chamadas, {"abc123": 1, "def456": 2})
+                    self.assertEqual(downloads, ["abc123", "def456"])
+                    with open(os.path.join(playlists, "lista.m3u"), encoding="utf-8") as handle:
+                        self.assertEqual(handle.read().count("#EXTINF:"), 2)
+                finally:
+                    state.close()
+
     def test_normalizar_artistas_preserva_lista_e_nome_de_banda(self):
         self.assertEqual(
             pltube.normalizar_artistas({"artists": ["Artista Um", "Artista Dois"]}),
@@ -205,8 +339,12 @@ class PltubeTests(unittest.TestCase):
         dormir.assert_not_called()
 
     def test_parametro_esperar_bloqueio_aparece_no_parser(self):
-        args = pltube.criar_parser().parse_args(["--esperar-bloqueio"])
+        args = pltube.criar_parser().parse_args(
+            ["--esperar-bloqueio", "--reprocess", "--state-file", "cache.sqlite3"]
+        )
         self.assertTrue(args.esperar_bloqueio)
+        self.assertTrue(args.reprocess)
+        self.assertEqual(args.state_file, "cache.sqlite3")
 
 
 if __name__ == "__main__":

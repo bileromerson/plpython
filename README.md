@@ -2,6 +2,8 @@
 
 Ferramenta em Python para baixar áudios de URLs do YouTube listadas em arquivos CSV e criar playlists no formato M3U. O programa usa os metadados do YouTube/yt-dlp para identificar os artistas.
 
+O desenho proposto para enriquecer esses dados e revisar metadados incertos está descrito em [MODELO_HIBRIDO_METADADOS.md](MODELO_HIBRIDO_METADADOS.md). É uma especificação para implementação futura; o resolvedor híbrido e a fila editável de revisão ainda não fazem parte do downloader.
+
 ## Requisitos
 
 - Python 3.10 ou superior
@@ -48,7 +50,21 @@ Se o YouTube responder com um bloqueio temporário ou limite de requisições, v
 python pltube.py --lista csvs/Alone.csv --esperar-bloqueio
 ```
 
-Esse modo tenta novamente após 30 segundos, dobrando a espera a cada falha até o limite de 10 minutos. Ele faz no máximo 6 novas tentativas e então interrompe o processamento da playlist, em vez de continuar enviando requisições enquanto o acesso estiver bloqueado. Sem o parâmetro, não há espera automática; ao detectar um bloqueio, a playlist é interrompida. `-h` ou `--help` mostra todas as opções.
+Esse modo tenta novamente após 30 segundos, dobrando a espera a cada falha até o limite de 10 minutos. Ele faz no máximo 6 novas tentativas e então interrompe toda a execução, sem consultar os CSVs seguintes enquanto o acesso estiver bloqueado. Sem o parâmetro, não há espera automática; ao detectar um bloqueio, a execução também é interrompida. `-h` ou `--help` mostra todas as opções.
+
+## Cache e retomada
+
+O programa mantém por padrão `pltube_state.sqlite3` na pasta base (o arquivo é ignorado pelo Git). Depois de cada linha processada, salva o ponto de retomada e os dados da faixa. Se o programa for interrompido, execute o mesmo comando novamente: as linhas já checkpointadas não serão consultadas de novo no YouTube. Um CSV inalterado e concluído nem precisa ser aberto; a playlist M3U é reconstruída a partir do banco local.
+
+O cache de vídeos é compartilhado entre todos os CSVs: se o mesmo vídeo do YouTube aparece em outra playlist, o caminho local é reutilizado, sem nova consulta nem novo download. A deduplicação usa o ID do vídeo; uploads diferentes da mesma música não são considerados iguais automaticamente. Arquivos antigos com o ID no nome (`[ID-do-video].mp3`) também podem ser reconhecidos localmente. Arquivos sem ID, e que ainda não estejam no banco de estado, podem exigir uma consulta inicial ao YouTube para identificá-los.
+
+Para tentar novamente faixas que falharam anteriormente, reprocessando a lista com o cache de sucessos:
+
+```bash
+python pltube.py --lista csvs/Alone.csv --reprocess
+```
+
+É possível mudar a localização do banco com `--state-file caminho.sqlite3`. Não apague esse banco se quiser conservar o progresso; apague-o apenas se desejar reiniciar todo o histórico local. O CSV parcialmente processado ainda é percorrido localmente até o cursor salvo, mas as linhas concluídas não geram novas chamadas ao yt-dlp/YouTube. O cache reduz consultas repetidas, mas faixas novas ainda exigem acesso ao YouTube e podem estar sujeitas aos limites definidos pelo serviço.
 
 As falhas são registradas em `Logs.txt` por padrão. Os testes locais podem ser executados com:
 
