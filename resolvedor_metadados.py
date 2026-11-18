@@ -82,6 +82,8 @@ class ResolutionResult:
     diagnostics_by_source: dict[str, list[str]] = field(default_factory=dict)
     source_youtube: dict[str, Any] = field(default_factory=dict)
     source_local: dict[str, Any] = field(default_factory=dict)
+    observations: list[str] = field(default_factory=list)
+    policy: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Retorna uma cópia simples apropriada para JSON/SQLite."""
@@ -1126,3 +1128,311 @@ __all__ = [
 # https://musicbrainz.org/doc/MusicBrainz_API/Search/RecordingSearch
 # https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
 # https://musicbrainz.org/doc/Cover_Art_Archive/API
+
+
+# ---------------------------------------------------------------------------
+# Resolução com prioridades (YouTube x MusicBrainz) e status OBSERVAR
+# ---------------------------------------------------------------------------
+
+PREFERENCIAS = ("youtube", "musicbrainz")
+REVISOES = ("all", "diff", "none")
+_TITLE_SEPARATOR = re.compile(r"\s+[-–—|]\s+")
+_TITLE_NOISE = re.compile(
+    r"\s*[\[(](?:[^\])]*?\b(?:official|oficial|lyrics?|letra|legendado|visuali[sz]er|"
+    r"audio|áudio|video|vídeo|clipe|mv|hd|4k|hq|remaster(?:ed)?|explicit)\b[^\])]*)[\])]",
+    re.IGNORECASE,
+)
+_TITLE_FEAT = re.compile(
+    r"\s*[\[(]?\s*\b(?:feat(?:uring)?\.?|ft\.?|part\.?|com)\s+([^\])]+?)\s*[\])]?\s*$",
+    re.IGNORECASE,
+)
+_CHANNEL_SUFFIX = re.compile(r"\s*(?:-\s*topic|vevo|official|oficial|music|tv)\s*$", re.IGNORECASE)
+
+
+def limpar_titulo_youtube(title: str) -> tuple[str, list[str]]:
+    """Remove ruídos como "(Official Video)" e separa participações "feat. X"."""
+    text = _text(title)
+    previous = None
+    while previous != text:
+        previous = text
+        text = _TITLE_NOISE.sub("", text).strip()
+        text = re.sub(r"\s*[-–—]\s*(?:official|lyrics?|audio|video)\b.*$", "", text, flags=re.I).strip()
+    featured: list[str] = []
+    match = _TITLE_FEAT.search(text)
+    if match and match.start() > 0:
+        featured = [a.strip() for a in re.split(r"\s*(?:,|&| e | and | x )\s*", match.group(1)) if a.strip()]
+        text = text[: match.start()].strip()
+    return text.strip(" -–—|\"'"), featured
+
+
+def hipoteses_youtube(yt: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Gera interpretações de título/artista a partir dos dados do vídeo, da mais confiável à menos."""
+    hipoteses: list[dict[str, Any]] = []
+
+    def add(title: str, artists: list[str], origem: str) -> None:
+        title = _text(title)
+        artists = [a for a in dict.fromkeys(_text(a) for a in artists) if a]
+        chave = (_normalize_text(title), tuple(_normalize_text(a) for a in artists))
+        if title and all(h["_chave"] != chave for h in hipoteses):
+            hipoteses.append({"title": title, "artists": artists, "origem": origem, "_chave": chave})
+
+    bruto = _text(yt.get("title"))
+    titulo, feat = limpar_titulo_youtube(bruto)
+    uploader = _text(yt.get("uploader"))
+    if yt.get("artists"):
+        add(titulo, list(yt["artists"]) + feat, "youtube")
+    if uploader.casefold().endswith("- topic"):
+        add(titulo, [uploader[: -len("- topic")].strip()] + feat, "youtube_canal_topic")
+    partes = _TITLE_SEPARATOR.split(titulo, maxsplit=1)
+    if len(partes) == 2:
+        esquerda, direita = (p.strip() for p in partes)
+        dir_titulo, dir_feat = limpar_titulo_youtube(direita)
+        esq_titulo, esq_feat = limpar_titulo_youtube(esquerda)
+        canal = _normalize_text(_CHANNEL_SUFFIX.sub("", uploader))
+        # Se o canal bate com um dos lados, esse lado provavelmente é o artista.
+        ordem = [
+            (dir_titulo, _artists(esquerda) + dir_feat + feat, "youtube_titulo_artista_primeiro"),
+            (esq_titulo, _artists(direita) + esq_feat + feat, "youtube_titulo_artista_depois"),
+        ]
+        if canal and _similarity(canal, direita) > _similarity(canal, esquerda):
+            ordem.reverse()
+        for item in ordem:
+            add(*item)
+    canal_limpo = _CHANNEL_SUFFIX.sub("", uploader).strip()
+    if canal_limpo:
+        add(titulo, [canal_limpo] + feat, "youtube_canal")
+    add(titulo, feat, "youtube_somente_titulo")
+    for h in hipoteses:
+        h.pop("_chave", None)
+    return hipoteses
+
+
+def _mesmo_texto(a: str, b: str, limiar: float = 0.9) -> bool:
+    return _similarity(a, b) >= limiar
+
+
+def _mesmos_artistas(a: Sequence[str], b: Sequence[str]) -> bool:
+    if not a or not b:
+        return False
+    return _mesmo_texto(" ".join(sorted(map(_normalize_text, a))), " ".join(sorted(map(_normalize_text, b))), 0.85) or (
+        _mesmo_texto(a[0], b[0], 0.9)
+    )
+
+
+def resolver_com_prioridade(
+    video_id: str,
+    dados_ytdlp: Mapping[str, Any] | None,
+    correcoes_locais: Mapping[str, Any] | None = None,
+    cache: MutableMapping[str, Any] | None = None,
+    *,
+    musicbrainz_client: MusicBrainzClient | Any | None = None,
+    consultar_musicbrainz: bool = True,
+    preferir: str = "youtube",
+    revisar: str = "all",
+    exigir_isrc: bool = False,
+    exigir_artista_musicbrainz: bool = False,
+    dados_locais: Mapping[str, Any] | None = None,
+    limite_candidatos: int = 10,
+    limiar_correspondencia: float = 0.82,
+    margem_correspondencia: float = 0.06,
+) -> ResolutionResult:
+    """Compara YouTube e MusicBrainz campo a campo e escolhe pela preferência.
+
+    * Campos iguais (tolerando grafia/acentos): usa a grafia canônica do MusicBrainz, confirmado.
+    * Campos diferentes: usa ``preferir`` ("youtube" ou "musicbrainz") e anota a divergência.
+    * Sem correspondência: usa o YouTube e anota "veio só do YouTube".
+
+    ``revisar``: "all" marca OBSERVAR tanto divergências quanto dados só do YouTube;
+    "diff" só divergências; "none" não marca nada (as anotações ficam nos diagnósticos).
+    PENDENTE fica reservado para quando falta título/artista ou um requisito (--require-*).
+    """
+    if preferir not in PREFERENCIAS:
+        raise ValueError(f"preferir deve ser um de {PREFERENCIAS}")
+    if revisar not in REVISOES:
+        raise ValueError(f"revisar deve ser um de {REVISOES}")
+    dados_ytdlp = dados_ytdlp if isinstance(dados_ytdlp, Mapping) else {}
+    cache = cache if cache is not None else {}
+    manual = _confirmed_manual_record(correcoes_locais, video_id)
+    yt = _extract_youtube_metadata(dados_ytdlp)
+    local = _extract_local_metadata(dados_locais)
+    hipoteses = hipoteses_youtube(yt) if yt["title"] else []
+    if local["title"]:
+        hipoteses.append({"title": local["title"], "artists": local["artists"], "origem": "local"})
+
+    base = hipoteses[0] if hipoteses else {"title": "", "artists": [], "origem": ""}
+    metadata: dict[str, Any] = {
+        "id": _text(video_id) or _text(dados_ytdlp.get("id")),
+        "title": base["title"], "artists": list(base["artists"]),
+        "artist": (base["artists"] or [""])[0],
+        "album": yt["album"] or local["album"], "isrc": yt["isrc"] or local["isrc"],
+        "duration": yt["duration"], "uploader": yt["uploader"],
+        "thumbnail_url": yt["thumbnail_url"], "thumbnails": yt["thumbnails"],
+        "cover_url": "", "cover_file": "",
+        "musicbrainz_recording_id": "", "musicbrainz_release_id": "",
+    }
+    provenance: dict[str, str] = {}
+    confidence: dict[str, str] = {}
+    for campo in ("title", "artists"):
+        if metadata[campo]:
+            provenance[campo] = base["origem"]
+            confidence[campo] = "provisoria"
+    for campo in ("album", "isrc"):
+        if metadata[campo]:
+            provenance[campo] = "youtube" if yt[campo] else "local"
+            confidence[campo] = "provisoria"
+    if metadata["uploader"]:
+        provenance["uploader"] = "youtube"
+        confidence["uploader"] = "origem_nao_artista"
+
+    diag: dict[str, list[str]] = {"youtube": [], "local": [], "musicbrainz": []}
+    observacoes: list[str] = []
+    diferencas: list[str] = []
+    candidatos: list[dict[str, Any]] = []
+    escolhido: Mapping[str, Any] | None = None
+    hipotese_escolhida = base
+    client = musicbrainz_client
+    if consultar_musicbrainz and client is None:
+        client = MusicBrainzClient()
+    tem_manual = bool(_manual_values(manual).get("title") and _manual_values(manual).get("artists"))
+
+    if base["origem"] not in ("youtube", ""):
+        diag["youtube"].append(f"artista/título deduzidos ({base['origem']}), sem crédito explícito do YouTube")
+
+    if consultar_musicbrainz and client is not None and not tem_manual and hipoteses:
+        try:
+            isrc = normalize_isrc(metadata["isrc"])
+            if isrc:
+                brutos = _cached_search(cache, f"isrc:{isrc}", lambda: client.search_by_isrc(isrc, limit=limite_candidatos))
+                exatos = [c for c in brutos if isrc in {normalize_isrc(v) for v in c.get("isrcs", [])}]
+                chosen, ambiguous = _choose_exact_isrc(exatos) if exatos else (None, False)
+                if chosen and not ambiguous:
+                    escolhido = chosen
+                    candidatos = [_public_candidate(chosen, 1.0)]
+            if escolhido is None:
+                melhor: tuple[float, Any, dict[str, Any], list] | None = None
+                for h in hipoteses[:4]:
+                    if h["artists"]:
+                        chave = f"title_artist:{_normalize_text(h['title'])}|{_normalize_text(h['artists'][0])}"
+                        op = (lambda h=h: client.search_by_title_artist(h["title"], h["artists"][0], limit=limite_candidatos))
+                    else:
+                        chave = f"title_only:{_normalize_text(h['title'])}"
+                        op = (lambda h=h: client.search_by_title(h["title"], limit=limite_candidatos))
+                    ranked = _rank_candidates(
+                        _cached_search(cache, chave, op),
+                        title=h["title"], artists=h["artists"], duration=metadata["duration"],
+                    )
+                    if not ranked:
+                        continue
+                    limiar = limiar_correspondencia if h["artists"] else max(limiar_correspondencia, 0.9)
+                    chosen, _amb = _choose_ranked(ranked, threshold=limiar, margin=margem_correspondencia)
+                    if chosen is not None and (melhor is None or ranked[0][1] > melhor[0]):
+                        melhor = (ranked[0][1], chosen, h, ranked)
+                    elif melhor is None and not candidatos:
+                        candidatos = [_public_candidate(c, sc) for c, sc in ranked[:5]]
+                    if melhor and melhor[0] >= 0.97:
+                        break
+                if melhor:
+                    _, escolhido, hipotese_escolhida, ranked = melhor
+                    candidatos = [_public_candidate(c, sc) for c, sc in ranked[:5]]
+        except Exception as exc:  # rede, limite, cliente injetado
+            diag["musicbrainz"].append(f"MusicBrainz indisponível: {exc}")
+
+    if escolhido is not None:
+        metadata["title"] = hipotese_escolhida["title"]
+        metadata["artists"] = list(hipotese_escolhida["artists"])
+        origem_yt = hipotese_escolhida["origem"]
+        if candidatos == [] :
+            candidatos = [_public_candidate(escolhido, 1.0)]
+        if escolhido.get("recording_id"):
+            metadata["musicbrainz_recording_id"] = escolhido["recording_id"]
+            provenance["musicbrainz_recording_id"] = "musicbrainz"
+        mb_valores = {"title": _text(escolhido.get("title")), "artists": _artists(escolhido.get("artists"))}
+        for campo, rotulo in (("title", "título"), ("artists", "artista")):
+            yt_val, mb_val = metadata[campo], mb_valores[campo]
+            if not mb_val:
+                if yt_val:
+                    observacoes.append(f"{rotulo} só do YouTube (MusicBrainz não informou)")
+                continue
+            iguais = _mesmos_artistas(yt_val, mb_val) if campo == "artists" else _mesmo_texto(yt_val, mb_val)
+            if not yt_val or iguais:
+                metadata[campo] = mb_val
+                provenance[campo] = "musicbrainz" if not yt_val else "youtube_validado_musicbrainz"
+                confidence[campo] = "confirmada"
+                continue
+            mostrar = (lambda v: " | ".join(v)) if campo == "artists" else (lambda v: v)
+            nota = f"{rotulo} diverge: YouTube='{mostrar(yt_val)}' / MusicBrainz='{mostrar(mb_val)}'"
+            diferencas.append(nota)
+            if preferir == "musicbrainz":
+                metadata[campo] = mb_val
+                provenance[campo] = "musicbrainz"
+                confidence[campo] = "preferencia_musicbrainz"
+            else:
+                provenance[campo] = origem_yt
+                confidence[campo] = "preferencia_youtube"
+        isrcs = [normalize_isrc(v) for v in escolhido.get("isrcs", []) if normalize_isrc(v)]
+        if isrcs:
+            if metadata["isrc"] and metadata["isrc"] not in isrcs:
+                diferencas.append(f"ISRC diverge: YouTube='{metadata['isrc']}' / MusicBrainz='{isrcs[0]}'")
+                if preferir == "musicbrainz":
+                    metadata["isrc"] = isrcs[0]
+                    provenance["isrc"] = "musicbrainz"
+            else:
+                metadata["isrc"] = metadata["isrc"] or isrcs[0]
+                provenance["isrc"] = "musicbrainz"
+                confidence["isrc"] = "confirmada"
+        album_yt = metadata["album"]
+        try:
+            _resolve_release(metadata, provenance, confidence, escolhido, client, diag["musicbrainz"], manual)
+        except Exception as exc:
+            diag["musicbrainz"].append(f"lançamento não resolvido: {exc}")
+        if album_yt and metadata["album"] and not _mesmo_texto(album_yt, metadata["album"]):
+            diferencas.append(f"álbum diverge: YouTube='{album_yt}' / MusicBrainz='{metadata['album']}'")
+            if preferir == "youtube":
+                metadata["album"] = album_yt
+                provenance["album"] = "youtube"
+    elif hipoteses and not tem_manual:
+        motivo = "MusicBrainz não encontrou correspondência confiável" if consultar_musicbrainz else "MusicBrainz não consultado"
+        diag["musicbrainz"].append(motivo)
+        observacoes.append(f"{motivo}; usando título/artista do YouTube ({base['origem']})")
+
+    # Correções manuais confirmadas vencem tudo.
+    for campo, valor in _manual_values(manual).items():
+        metadata[campo] = valor
+        provenance[campo] = "manual"
+        confidence[campo] = "confirmada"
+    metadata["artist"] = (metadata["artists"] or [""])[0]
+
+    motivos: list[str] = []
+    if not metadata["title"]:
+        motivos.append("campo obrigatório ausente: title")
+    if not metadata["artists"]:
+        motivos.append("nenhum artista identificado")
+    if exigir_isrc and provenance.get("isrc") not in {"musicbrainz", "manual"}:
+        motivos.append("ISRC não confirmado pelo MusicBrainz ou por revisão manual")
+    if exigir_artista_musicbrainz and provenance.get("artists") not in {
+        "musicbrainz", "youtube_validado_musicbrainz", "manual"
+    }:
+        motivos.append("artista não confirmado pelo MusicBrainz ou por revisão manual")
+
+    marcar = diferencas + (observacoes if revisar == "all" else [])
+    if revisar == "none":
+        marcar = []
+    status = "PENDENTE" if motivos else ("OBSERVAR" if marcar else "RESOLVIDO")
+    todas = diferencas + observacoes
+    return ResolutionResult(
+        video_id=metadata["id"],
+        status=status,
+        metadata=metadata,
+        provenance=provenance,
+        confidence=confidence,
+        pending_reasons=motivos,
+        candidates=candidatos,
+        diagnostics=list(dict.fromkeys(todas + diag["youtube"] + diag["musicbrainz"])),
+        diagnostics_by_source={k: list(dict.fromkeys(v)) for k, v in diag.items()},
+        source_youtube=yt,
+        source_local=local,
+        observations=todas,
+        policy={"preferir": preferir, "revisar": revisar,
+                "hipotese": hipotese_escolhida.get("origem", ""),
+                "hipoteses": [{k: h[k] for k in ("title", "artists", "origem")} for h in hipoteses]},
+    )

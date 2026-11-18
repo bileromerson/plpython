@@ -14,7 +14,9 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from resolvedor_metadados import MusicBrainzClient, normalize_isrc, resolver_metadados
+from resolvedor_metadados import (
+    MusicBrainzClient, normalize_isrc, resolver_com_prioridade, resolver_metadados,
+)
 
 try:
     import yt_dlp
@@ -32,6 +34,9 @@ ESPERAR_BLOQUEIO = False
 MODELO_HIBRIDO = False
 EXIGIR_ISRC = False
 EXIGIR_ARTISTA_MUSICBRAINZ = False
+PREFERIR = "youtube"  # em divergência: youtube | musicbrainz
+REVISAR = "all"  # all | diff | none
+STATUS_REVISAO = ("PENDENTE", "OBSERVAR")
 MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
 RESOLVER_CACHE: dict[str, Any] = {}
 MAX_TENTATIVAS_BLOQUEIO = 6
@@ -43,7 +48,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     """BaseDir aponta para CSVs; diretórios de saída têm caminhos independentes."""
     global BASE_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
     global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC
-    global EXIGIR_ARTISTA_MUSICBRAINZ
+    global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
     BASE_DIR = os.path.abspath(args.base_dir or os.getcwd())
     SONGS_DIR = os.path.abspath(args.songs_dir) if args.songs_dir else BASE_DIR
@@ -59,6 +64,8 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     MODELO_HIBRIDO = args.modelo_hibrido
     EXIGIR_ISRC = args.exigir_isrc
     EXIGIR_ARTISTA_MUSICBRAINZ = args.exigir_artista_musicbrainz
+    PREFERIR = getattr(args, "preferir", None) or "youtube"
+    REVISAR = getattr(args, "revisar", None) or "all"
 
 
 def registrar_erro(url: str, motivo: str, playlist: str = "") -> None:
@@ -405,6 +412,13 @@ def abrir_banco_estado(
         );
         """
     )
+    colunas_tracks = {
+        linha[1] for linha in conexao.execute("PRAGMA music.table_info(music_tracks)").fetchall()
+    }
+    if "review_note" not in colunas_tracks:
+        conexao.execute(
+            "ALTER TABLE music.music_tracks ADD COLUMN review_note TEXT NOT NULL DEFAULT ''"
+        )
     # Compatibilidade de leitura com chamadas antigas e ferramentas locais.
     conexao.execute(
         "CREATE TEMP VIEW IF NOT EXISTS metadata_resolution AS "
@@ -682,13 +696,16 @@ def _salvar_metadados_musica(
         json.dumps(confidence, ensure_ascii=False),
         json.dumps(diagnostics_by_source, ensure_ascii=False),
         json.dumps(dados, ensure_ascii=False),
+        " | ".join(
+            (dados.get("pending_reasons") or []) + (dados.get("observations") or [])
+        ) if track_status in STATUS_REVISAO else "",
     )
     conexao.execute(
         """INSERT INTO music.music_tracks
         (video_key, video_id, title, artists_json, album, isrc, duration,
          thumbnail_url, cover_url, metadata_status, source_youtube_json,
-         provenance_json, confidence_json, diagnostics_json, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         provenance_json, confidence_json, diagnostics_json, metadata_json, review_note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_key) DO UPDATE SET
         video_id=excluded.video_id, title=excluded.title,
         artists_json=excluded.artists_json, album=excluded.album,
@@ -699,7 +716,8 @@ def _salvar_metadados_musica(
         provenance_json=excluded.provenance_json,
         confidence_json=excluded.confidence_json,
         diagnostics_json=excluded.diagnostics_json,
-        metadata_json=excluded.metadata_json, updated_at=CURRENT_TIMESTAMP""",
+        metadata_json=excluded.metadata_json, review_note=excluded.review_note,
+        updated_at=CURRENT_TIMESTAMP""",
         values,
     )
 
@@ -767,12 +785,13 @@ def resolver_meta_hibrido(
     campos_obrigatorios = ["title", "artists", "album"]
     if EXIGIR_ISRC:
         campos_obrigatorios.append("isrc")
-    resultado = resolver_metadados(
+    resultado = resolver_com_prioridade(
         str(meta.get("id") or ""),
         {} if sem_dados_youtube else meta,
         cache=RESOLVER_CACHE,
         musicbrainz_client=MUSICBRAINZ_CLIENT,
-        campos_obrigatorios=campos_obrigatorios,
+        preferir=PREFERIR,
+        revisar=REVISAR,
         exigir_isrc=EXIGIR_ISRC,
         exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
         dados_locais=dados_locais,
@@ -809,6 +828,8 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
             "PLTUBE_METADATA_NOTE": (
                 "Metadados provisórios; podem estar incorretos. Consulte metadados_pendentes.csv."
                 if resultado.get("status") == "PENDENTE"
+                else "Confira título/artista; veja observacoes em metadados_pendentes.csv."
+                if resultado.get("status") == "OBSERVAR"
                 else "Metadados confirmados pelo modelo híbrido."
             ),
             "PLTUBE_METADATA_PROVENANCE": json.dumps(
@@ -818,7 +839,7 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
                 resultado.get("confidence") or {}, ensure_ascii=False
             ),
             "PLTUBE_METADATA_REVIEW": " | ".join(
-                resultado.get("pending_reasons") or []
+                (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
             ),
         }
         for desc, value in valores.items():
@@ -847,7 +868,7 @@ def exportar_metadados_pendentes(
         "artistas_usados", "album_sugerido", "isrc_youtube", "isrc_sugerido",
         "thumbnail_youtube", "capa_sugerida", "motivos_pendencia", "diagnosticos",
         "diagnosticos_youtube", "diagnosticos_local", "diagnosticos_musicbrainz",
-        "candidatos_musicbrainz", "proveniencia", "confianca", *colunas_editaveis,
+        "candidatos_musicbrainz", "proveniencia", "confianca", "observacoes", *colunas_editaveis,
     ]
     edicoes_anteriores: dict[str, dict[str, str]] = {}
     colunas_anteriores: set[str] = set()
@@ -873,7 +894,7 @@ def exportar_metadados_pendentes(
                   v.source_url
            FROM music.metadata_resolution r
            LEFT JOIN video_cache v ON v.video_key = r.video_key
-           WHERE r.status = 'PENDENTE'
+           WHERE r.status IN ('PENDENTE', 'OBSERVAR')
            ORDER BY r.video_id, r.video_key"""
     ).fetchall()
     fd, temporario = tempfile.mkstemp(
@@ -939,6 +960,7 @@ def exportar_metadados_pendentes(
                     "confianca": json.dumps(
                         resultado.get("confidence") or {}, ensure_ascii=False
                     ),
+                    "observacoes": " | ".join(resultado.get("observations") or []),
                 }
                 padroes = {
                     "aplicar": "nao",
@@ -1114,7 +1136,7 @@ def baixar_musica(
     # explícita de fallback; o uploader nunca é promovido no modo híbrido.
     pendente = bool(hybrid_result and hybrid_result.get("status") == "PENDENTE")
     artista_principal = nome_seguro(artists[0], "Artista Desconhecido")
-    if artista_principal.casefold() in {"_pendentes", "_library"}:
+    if artista_principal.casefold() in {"_pendentes", "_observar", "_library"}:
         artista_principal = "Artista Desconhecido"
     pasta_download = os.path.join(SONGS_DIR, artista_principal)
     os.makedirs(pasta_download, exist_ok=True)
@@ -1395,7 +1417,7 @@ def processar_csv(
                                 )
                                 tentar_novamente = bool(
                                     salvo_hibrido and reprocess
-                                    and salvo_hibrido["result"].get("status") == "PENDENTE"
+                                    and salvo_hibrido["result"].get("status") in STATUS_REVISAO
                                     and not (salvo_hibrido["result"].get("manual_review") or {}).get("fields")
                                 )
                                 if salvo_hibrido and not tentar_novamente:
@@ -1464,11 +1486,12 @@ def processar_csv(
                                     bloqueado = True
                                     break
 
-                            if (
-                                music_path and hybrid_result
-                                and hybrid_result.get("status") == "PENDENTE"
-                            ):
-                                criar_link_artista(music_path, "_pendentes")
+                            if music_path and hybrid_result:
+                                pasta_revisao = {
+                                    "PENDENTE": "_pendentes", "OBSERVAR": "_observar",
+                                }.get(hybrid_result.get("status"))
+                                if pasta_revisao:
+                                    criar_link_artista(music_path, pasta_revisao)
 
                             if music_path and estado is not None and meta:
                                 salvar_video_cache(
@@ -1584,6 +1607,14 @@ def criar_parser() -> argparse.ArgumentParser:
         help="No modelo híbrido, exige que o artista seja confirmado pelo MusicBrainz ou manualmente",
     )
     parser.add_argument(
+        "--preferir", choices=["youtube", "musicbrainz"], default="youtube",
+        help="No modelo híbrido, qual fonte vence quando YouTube e MusicBrainz divergem (padrão: youtube)",
+    )
+    parser.add_argument(
+        "--revisar", choices=["all", "diff", "none"], default="all",
+        help="Quais faixas marcar como OBSERVAR: all (divergências e só-YouTube), diff (só divergências), none",
+    )
+    parser.add_argument(
         "--reprocess", action="store_true",
         help="Relê o CSV, tenta itens que falharam e reconsulta pendências MusicBrainz sem refazer downloads concluídos",
     )
@@ -1656,7 +1687,7 @@ def executar(args: argparse.Namespace) -> int:
             try:
                 caminho_pendencias = exportar_metadados_pendentes(estado)
                 total_pendentes = estado.execute(
-                    "SELECT COUNT(*) FROM metadata_resolution WHERE status = 'PENDENTE'"
+                    "SELECT COUNT(*) FROM metadata_resolution WHERE status IN ('PENDENTE', 'OBSERVAR')"
                 ).fetchone()[0]
                 print(
                     f"Fila de metadados pendentes: {total_pendentes} faixa(s) em "

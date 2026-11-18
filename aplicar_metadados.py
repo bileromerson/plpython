@@ -130,8 +130,9 @@ def _montar_plano(
     if confirmar:
         resultado["status"] = "RESOLVIDO"
         resultado["pending_reasons"] = []
+        resultado["observations"] = []
     else:
-        resultado["status"] = "PENDENTE"
+        resultado["status"] = "OBSERVAR" if resultado.get("status") == "OBSERVAR" else "PENDENTE"
         razoes = list(resultado.get("pending_reasons") or [])
         razao_parcial = "revisão parcial; confirme manualmente após revisar os campos restantes"
         if razao_parcial not in razoes:

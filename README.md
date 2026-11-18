@@ -66,6 +66,40 @@ python plpython.py revert -s songs            # simula
 python plpython.py revert -s songs --apply
 ```
 
+### Prioridades do modelo híbrido (YouTube × MusicBrainz)
+
+Com `--hybrid`, cada faixa é comparada campo a campo (título, artistas, álbum, ISRC) entre o YouTube e o MusicBrainz:
+
+- **Iguais** (tolerando maiúsculas, acentos, "(Official Video)", "feat."): usa a grafia oficial do MusicBrainz e a faixa fica `RESOLVIDO`.
+- **Diferentes:** por padrão vence o **YouTube**; com `--prefer-db` vence o **MusicBrainz**. Nos dois casos a faixa fica `OBSERVAR` com a divergência anotada.
+- **Não encontrada no MusicBrainz:** usa o YouTube e marca `OBSERVAR` ("veio só do YouTube").
+- **`PENDENTE`** fica só para o que realmente falta: sem artista algum, ou um requisito de `--require-isrc`/`--require-mb-artist`.
+
+Para identificar melhor quando o YouTube não dá crédito de artista, o título é limpo (remove "(Official Video)", "[Lyrics]", "HD"…), participações "feat./ft." viram artistas, canais "Artista - Topic" são usados, e títulos "A - B" são testados nas duas ordens no MusicBrainz, ficando a que bater melhor.
+
+| Opção | Efeito |
+|---|---|
+| *(padrão)* | divergência → YouTube; marca `OBSERVAR` divergências **e** dados só do YouTube |
+| `--prefer-db` | divergência → MusicBrainz; ainda marca `OBSERVAR` |
+| `--review diff` | marca só divergências; dados só do YouTube passam direto |
+| `--no-review` (`--review none`) | não marca nada, segue direto (as notas ficam guardadas no banco) |
+
+Onde conferir: `metadados_pendentes.csv` (agora com a coluna `observacoes`), a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
+
+```sql
+-- sqlite3 csvs/sql/musicas.sqlite3
+SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status = 'OBSERVAR';
+```
+
+Se estiver certo, marque `aplicar=sim` e `confirmar_manual=sim` na planilha e rode `plpython.py metadata --apply`. `update` reconsulta automaticamente as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou.
+
+```bash
+python plpython.py download -b ./csvs --hybrid
+python plpython.py download -b ./csvs --prefer-db
+python plpython.py download -b ./csvs --hybrid --review diff
+python plpython.py download -b ./csvs --hybrid --no-review
+```
+
 ## O que já funciona
 
 ### Downloader do YouTube

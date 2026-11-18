@@ -204,7 +204,7 @@ class PltubeTests(unittest.TestCase):
             cliente = BaseSemResultados()
 
             def download(url, artists, title, video_id, csv_file, hybrid_result=None):
-                self.assertEqual(hybrid_result["status"], "PENDENTE")
+                self.assertEqual(hybrid_result["status"], "OBSERVAR")
                 pasta = os.path.join(songs, artists[0])
                 os.makedirs(pasta, exist_ok=True)
                 path = os.path.join(pasta, f"{title} [{video_id}].mp3")
@@ -229,11 +229,11 @@ class PltubeTests(unittest.TestCase):
 
                     path = os.path.join(songs, "Artista do vídeo", "Canção provisória [abc123].mp3")
                     self.assertTrue(os.path.isfile(path))
-                    pending_link = os.path.join(songs, "_pendentes", os.path.basename(path))
+                    pending_link = os.path.join(songs, "_observar", os.path.basename(path))
                     self.assertTrue(os.path.islink(pending_link))
                     self.assertEqual(os.path.realpath(pending_link), os.path.realpath(path))
                     saved = pltube.carregar_resolucao(state, "youtube:abc123")
-                    self.assertEqual(saved["result"]["status"], "PENDENTE")
+                    self.assertEqual(saved["result"]["status"], "OBSERVAR")
                     self.assertEqual(saved["audio_path"], path)
                     job = state.execute(
                         "SELECT status, audio_path FROM download_jobs WHERE video_key = ?",
@@ -247,7 +247,7 @@ class PltubeTests(unittest.TestCase):
                         ("youtube:abc123",),
                     ).fetchone()
                     self.assertEqual(track["title"], "Canção provisória")
-                    self.assertEqual(track["metadata_status"], "PENDENTE")
+                    self.assertEqual(track["metadata_status"], "OBSERVAR")
                     self.assertFalse(os.path.samefile(
                         dict((row[1], row[2]) for row in state.execute("PRAGMA database_list"))["main"],
                         dict((row[1], row[2]) for row in state.execute("PRAGMA database_list"))["music"],
@@ -260,7 +260,7 @@ class PltubeTests(unittest.TestCase):
                         rows = list(csv.DictReader(handle))
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["video_id"], "abc123")
-                    self.assertIn("sem confirmação", rows[0]["motivos_pendencia"])
+                    self.assertIn("usando título/artista do YouTube", rows[0]["observacoes"])
                     self.assertIn("lista", rows[0]["playlists"])
 
                     resultado_confirmado = {
@@ -365,9 +365,9 @@ class PltubeTests(unittest.TestCase):
                     apply_tags.assert_called_once()
                     self.assertEqual(apply_tags.call_args.args[0], audio_existente)
                     saved = pltube.carregar_resolucao(state, "youtube:abc123")
-                    self.assertEqual(saved["result"]["status"], "PENDENTE")
+                    self.assertEqual(saved["result"]["status"], "OBSERVAR")
                     self.assertEqual(saved["audio_path"], audio_existente)
-                    pending_link = os.path.join(songs, "_pendentes", os.path.basename(audio_existente))
+                    pending_link = os.path.join(songs, "_observar", os.path.basename(audio_existente))
                     self.assertTrue(os.path.islink(pending_link))
                     self.assertEqual(os.path.realpath(pending_link), os.path.realpath(audio_existente))
                 finally:

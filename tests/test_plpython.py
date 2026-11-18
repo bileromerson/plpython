@@ -22,6 +22,15 @@ class PlpythonCliTests(unittest.TestCase):
         self.assertTrue(args.modelo_hibrido)  # implícito por --require-isrc
         self.assertFalse(args.reprocess)
 
+    def test_prioridades_de_metadados(self):
+        args = self._capturar("pltube", ["download", "--prefer-db", "--no-review"])
+        self.assertEqual((args.preferir, args.revisar), ("musicbrainz", "none"))
+        self.assertTrue(args.modelo_hibrido)
+        args = self._capturar("pltube", ["download", "--hybrid"])
+        self.assertEqual((args.preferir, args.revisar), ("youtube", "all"))
+        args = self._capturar("pltube", ["download", "--review", "diff"])
+        self.assertEqual(args.revisar, "diff")
+
     def test_update_forca_retry(self):
         args = self._capturar("pltube", ["update", "-b", "x"])
         self.assertTrue(args.reprocess)

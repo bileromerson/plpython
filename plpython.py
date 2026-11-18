@@ -23,6 +23,8 @@ exemplos:
   python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links
   python plpython.py download -b ./csvs -s /media/Musicas -p ./m3u --hybrid
   python plpython.py update -b ./csvs --wait-on-limit
+  python plpython.py download -b ./csvs --hybrid --prefer-db
+  python plpython.py download -b ./csvs --hybrid --review diff
   python plpython.py metadata -b ./csvs            # simula
   python plpython.py metadata -b ./csvs --apply    # grava
   python plpython.py spotify https://open.spotify.com/playlist/ID
@@ -85,6 +87,15 @@ def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
                    help="deixa pendente faixa sem ISRC confirmado (ativa --hybrid)")
     h.add_argument("--require-mb-artist", dest="exigir_artista_musicbrainz", action="store_true",
                    help="exige artista confirmado pelo MusicBrainz (ativa --hybrid)")
+    h.add_argument("--prefer-db", dest="preferir", action="store_const", const="musicbrainz",
+                   default="youtube",
+                   help="se YouTube e MusicBrainz divergirem, usa o MusicBrainz (padrão: YouTube); "
+                        "a divergência continua indo para a lista (ativa --hybrid)")
+    h.add_argument("--review", dest="revisar", choices=["all", "diff", "none"], default="all",
+                   help="o que marcar como OBSERVAR: all = divergências + dados só do YouTube (padrão); "
+                        "diff = só divergências; none = não marca nada (ativa --hybrid)")
+    h.add_argument("--no-review", dest="revisar", action="store_const", const="none",
+                   help="atalho para --review none: segue direto sem lista de conferência")
     _oculto(p, "--modelo-hibrido", dest="modelo_hibrido", action="store_true")
     _oculto(p, "--exigir-isrc", dest="exigir_isrc", action="store_true")
     _oculto(p, "--exigir-artista-musicbrainz", dest="exigir_artista_musicbrainz", action="store_true")
@@ -109,7 +120,9 @@ def criar_parser() -> argparse.ArgumentParser:
                        epilog="exemplos:\n"
                               "  plpython.py download -b ./csvs\n"
                               "  plpython.py download csvs/Alone.csv --artist-links --append\n"
-                              "  plpython.py download -b ./csvs --hybrid --require-isrc")
+                              "  plpython.py download -b ./csvs --hybrid --require-isrc\n"
+                              "  plpython.py download -b ./csvs --prefer-db       # MusicBrainz vence divergências\n"
+                              "  plpython.py download -b ./csvs --hybrid --no-review")
     _opcoes_download(p, update=False)
 
     p = sub.add_parser("update", aliases=["atualizar"], formatter_class=fmt,
@@ -176,8 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         args.lista = list(args.csvs) + list(args.csvs_extra or [])
         if comando == "update":
             args.reprocess = True
-        if (args.exigir_isrc or args.exigir_artista_musicbrainz) and not args.modelo_hibrido:
-            print("--require-isrc/--require-mb-artist ativam o modo --hybrid.")
+        usa_opcao_hibrida = (
+            args.exigir_isrc or args.exigir_artista_musicbrainz
+            or args.preferir != "youtube" or args.revisar != "all"
+        )
+        if usa_opcao_hibrida and not args.modelo_hibrido:
+            print("Opções de metadados informadas: ativando o modo --hybrid.")
             args.modelo_hibrido = True
         args.state_file = args.downloads_db
         return pltube.executar(args)
