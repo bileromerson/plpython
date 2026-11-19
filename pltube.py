@@ -27,6 +27,7 @@ import verbose
 from verbose import curto, v, vv, vvv
 from resolvedor_metadados import (
     LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
+    _normalize_text as _normalizar_texto,
     dividir_artistas, ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade,
 )
 
@@ -1493,9 +1494,27 @@ def nome_seguro(valor: str, fallback: str = "sem-nome") -> str:
     return valor[:180]
 
 
+def pasta_do_artista(artista: str) -> str:
+    """Nome da pasta do artista. Se já existe uma pasta para o mesmo nome com outra
+    grafia ("WHSPRS" e "Whsprs", "kennyoung" e "Kennyoung"), usa a que já existe,
+    para não espalhar o mesmo artista em várias pastas."""
+    nome = nome_seguro(artista, "Artista Desconhecido")
+    chave = "".join(_normalizar_texto(nome).split()) if "_normalizar_texto" in globals() else ""
+    if not chave or not os.path.isdir(SONGS_DIR):
+        return nome
+    if os.path.isdir(os.path.join(SONGS_DIR, nome)):
+        return nome
+    for existente in sorted(os.listdir(SONGS_DIR)):
+        if existente.startswith(("_", ".")) or not os.path.isdir(os.path.join(SONGS_DIR, existente)):
+            continue
+        if "".join(_normalizar_texto(existente).split()) == chave:
+            return existente
+    return nome
+
+
 def criar_link_artista(arquivo_original: str, artista: str) -> bool:
     """Cria um atalho ao MP3 físico, sem copiar os dados da música."""
-    pasta_artista = os.path.join(SONGS_DIR, nome_seguro(artista, "Artista Desconhecido"))
+    pasta_artista = os.path.join(SONGS_DIR, pasta_do_artista(artista))
     destino = os.path.join(pasta_artista, os.path.basename(arquivo_original))
     os.makedirs(pasta_artista, exist_ok=True)
 
@@ -1537,7 +1556,7 @@ def mover_para_artista_principal(path: str, artistas: list[str]) -> str:
     pasta = os.path.dirname(os.path.abspath(path))
     if os.path.realpath(os.path.dirname(pasta)) != os.path.realpath(SONGS_DIR):
         return path
-    destino_nome = nome_seguro(artistas[0], "Artista Desconhecido")
+    destino_nome = pasta_do_artista(artistas[0])
     atual = os.path.basename(pasta)
     if atual == destino_nome or destino_nome.casefold() in {"_pendentes", "_observar", "_library"}:
         return path
@@ -1643,7 +1662,7 @@ def baixar_musica(
     # quando provisórios. Se nenhum artista veio do vídeo/base, usa a pasta
     # explícita de fallback; o uploader nunca é promovido no modo híbrido.
     pendente = bool(hybrid_result and hybrid_result.get("status") == "PENDENTE")
-    artista_principal = nome_seguro(artists[0], "Artista Desconhecido")
+    artista_principal = pasta_do_artista(artists[0])
     if artista_principal.casefold() in {"_pendentes", "_observar", "_library"}:
         artista_principal = "Artista Desconhecido"
     pasta_download = os.path.join(SONGS_DIR, artista_principal)

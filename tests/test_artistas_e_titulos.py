@@ -134,3 +134,34 @@ class TituloInvertidoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitulosReaisTests(unittest.TestCase):
+    """Títulos de verdade que geravam pasta com nome de música ou artista errado."""
+
+    CASOS = (  # (título do vídeo, canal, artistas, título)
+        ('Cult of the Lamb Song - "Fool\'s Gold" by ivycomb', "Ivycomb Music", ["ivycomb"], "Fool's Gold"),
+        ('Death Song (Puss in Boots) - "Ninth Life" by ivycomb', "Ivycomb Music", ["ivycomb"], "Ninth Life"),
+        ("INSTINCT - 02. Instinct", "NIIC", ["NIIC"], "Instinct"),
+        ("Domalomn - Urgently Jammin' (Sir Meow Remix)", "Sir Meow", ["Domalomn"], "Urgently Jammin' (Sir Meow Remix)"),
+        ("Just a Little Better - snuffles", "snuffles", ["snuffles"], "Just a Little Better"),
+        ("THIS THOUGHT - Frizk & snuffles", "snuffles", ["Frizk", "snuffles"], "THIS THOUGHT"),
+        ("TheFatRat & NEFFEX - Back One Day (Outro Song)", "TheFatRat", ["TheFatRat", "NEFFEX"], "Back One Day (Outro Song)"),
+        ("Seven Lions & ILLENIUM ft. ÁSDÍS - Not Even Love (Official Visualizer)", "Seven Lions",
+         ["Seven Lions", "ILLENIUM", "ÁSDÍS"], "Not Even Love"),
+        ("[Dubstep] - Tut Tut Child - Hummingbird (feat. Augustus Ghost) [Monstercat Release]", "Monstercat Uncaged",
+         ["Tut Tut Child", "Augustus Ghost"], "Hummingbird"),
+        ("My Ordinary Life-The Living Tombstone", "The Living Tombstone", ["The Living Tombstone"], "My Ordinary Life"),
+        ("twenty one pilots: Goner", "twenty one pilots", ["twenty one pilots"], "Goner"),
+        ("Glyde // Latte", "Glyde", ["Glyde"], "Latte"),
+        ("INFAMOUS (with YonKaGor and Stephanafro)", "Ivycomb Music", ["ivycomb", "YonKaGor", "Stephanafro"], "INFAMOUS"),
+        ("Final Space Official Soundtrack | When the Night is Long (feat. Shelby Merry) | WaterTower",
+         "WaterTower Music", ["WaterTower", "Shelby Merry"], "When the Night is Long"),
+    )
+
+    def test_titulos(self):
+        for video, canal, artistas, titulo in self.CASOS:
+            dados = {"title": video, "uploader": canal, "duration": 200}
+            res = r.resolver_com_prioridade("x", dados, consultar_musicbrainz=False)
+            self.assertEqual(([a.casefold() for a in res.metadata["artists"]], res.metadata["title"]),
+                             ([a.casefold() for a in artistas], titulo), video)

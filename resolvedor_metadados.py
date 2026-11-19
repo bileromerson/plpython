@@ -677,9 +677,11 @@ REVISOES = ("all", "diff", "none")
 LIMIAR_CONFIANCA = 0.85
 FONTES_EXPLICITAS = {"youtube_music", "youtube_artista", "youtube_canal_topic", "canal_aprendido"}
 
-_SEPARADOR_TITULO = re.compile(r"\s+[-–—]\s+")
+_SEPARADOR_TITULO = re.compile(r"\s+(?:[-–—]|//)\s+|\s*;\s+")  # "A - B", "A // B", "A; B"
 _SEPARADOR_SEGMENTO = re.compile(r"\s+[|｜]\s+")
-_POR = re.compile(r"^[\"“'‘](.+?)[\"”'’]\s+(?:by|de|por)\s+(.+)$", re.I)
+_POR = re.compile(r"^[\"“'‘](.+?)[\"”'’]\s+(?:remix\s+)?(?:by|de|por)\s+(.+)$", re.I)
+_NUMERO_FAIXA = re.compile(r"^\d{1,3}[.)]\s+")  # "02. Instinct": faixa de álbum
+_COM = re.compile(r"\s*\(\s*with\s+([^)]+)\)\s*$", re.I)  # "Música (with A and B)"
 _VARIANTE = re.compile(
     r"\s*[\[(【]([^\])】]*\b(?:slowed|sped\s*up|speed\s*up|nightcore|daycore|reverb|8d|"
     r"bass\s*boost(?:ed)?|pitched|acelerad[oa]|lento)\b[^\])】]*)[\])】]",
@@ -687,13 +689,14 @@ _VARIANTE = re.compile(
 )
 _RUIDO_PARENTESES = re.compile(
     r"\s*[\[(【](?:[^\])】]*?\b(?:official|oficial|lyrics?|letras?|legendad[oa]|"
-    r"tradu[cç][aã]o|visuali[sz]er|audio|áudio|video|vídeo|clipe|mv|hd|4k|hq|"
+    r"tradu[cç][aã]o|visuali[sz]er|audio|áudio|video|vídeo|clipe|mv|hd|4k|hq|release|"
     r"explicit|copyright|original\s+song|from\s+the|from\s+[\"“]|ost)\b[^\])】]*)[\])】]",
     re.I,
 )
 _RUIDO_FINAL = re.compile(
     r"(?:\s*[-–—]\s*(?:official|oficial|lyrics?|letra|audio|áudio|video|vídeo|visuali[sz]er)\b.*$"
-    r"|\s+No\.\s*\d+\s*$)",
+    r"|\s+No\.\s*\d+\s*$"
+    r"|\s+official\s+(?:music\s+|lyric\s+)?(?:video|audio)\s*$)",
     re.I,
 )
 _TITLE_FEAT = re.compile(
@@ -816,10 +819,14 @@ def _indice_nomes(conhecidos: Iterable[str]) -> dict[str, str]:
     if not _INDICE_BASE:
         _INDICE_BASE.update({_normalize_text(n): n for n in NOMES_COMPOSTOS})
     indice = dict(_INDICE_BASE)
+    contagem: dict[str, dict[str, int]] = {}
     for nome in conhecidos or ():
         chave = _normalize_text(nome)
-        if chave and chave not in indice:
-            indice[chave] = _text(nome)
+        if chave and chave not in _INDICE_BASE:
+            grafias = contagem.setdefault(chave, {})
+            grafias[_text(nome)] = grafias.get(_text(nome), 0) + 1
+    for chave, grafias in contagem.items():  # a grafia mais usada vale ("Kennyoung" 3× > "kennyoung" 1×)
+        indice[chave] = max(grafias, key=lambda g: (grafias[g], g))
     return indice
 
 
@@ -939,10 +946,12 @@ def _sem_obra(texto: Any) -> str:
 
 def analisar_titulo(title: str, conhecidos: Iterable[str] = ()) -> dict[str, Any]:
     """Decompõe o título do vídeo em partes úteis para identificar a música."""
-    texto = _remover_simbolos(_text(title))
+    texto = re.sub(r"(?:^|\s)#[^\W\d]\w*", " ", _remover_simbolos(_text(title))).strip()  # #hashtags (não "#2")
     segmentos = [s.strip() for s in _SEPARADOR_SEGMENTO.split(texto) if s.strip()]
-    principal = segmentos[0] if segmentos else ""
-    extras = segmentos[1:]
+    # "Interstellar Official Soundtrack | Cornfield Chase – Hans Zimmer": a 1ª parte é a obra
+    indice = next((i for i, seg in enumerate(segmentos) if not parece_obra(seg)), 0)
+    principal = segmentos[indice] if segmentos else ""
+    extras = segmentos[:indice] + segmentos[indice + 1:]
 
     variante = ""
     achou = _VARIANTE.search(principal)
@@ -950,6 +959,9 @@ def analisar_titulo(title: str, conhecidos: Iterable[str] = ()) -> dict[str, Any
         variante = achou.group(1).strip()
         principal = (principal[: achou.start()] + principal[achou.end():]).strip()
 
+    # "[Dubstep] - Música", "2. Artista - Música": etiqueta e número de faixa no começo
+    principal = re.sub(r"^\s*\[[^\]]*\]\s*(?:[-–—]\s*)?", "", principal).strip() or principal
+    principal = re.sub(r"^\d{1,3}\.\s+(?=\S+.*\s[-–—]\s)", "", principal).strip()
     anterior = None
     while anterior != principal:
         anterior = principal
@@ -957,17 +969,21 @@ def analisar_titulo(title: str, conhecidos: Iterable[str] = ()) -> dict[str, Any
         principal = _RUIDO_FINAL.sub("", principal).strip()
 
     feat: list[str] = []
-    achou = _TITLE_FEAT.search(principal)
-    if achou and achou.start() > 0:
-        # numa lista de participações, "&", "e" e "and" separam; uma dupla conhecida
-        # ("part. Jorge & Mateus") continua inteira porque a comparação ignora a pontuação
-        feat = dividir_artistas(re.sub(r"\s+(?:&|e|and)\s+", ", ", achou.group(1)), conhecidos)
-        principal = (principal[: achou.start()] + principal[achou.end():]).strip()
-    # "feat." também pode estar no meio: "Artista ft. Outro - Música"
+    # "Artista ft. Outro - Música": o "ft." do meio vem antes do "ft." do fim
     meio = re.search(r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+(.+?)(?=\s+[-–—]\s+)", principal, re.I)
     if meio:
         feat += dividir_artistas(re.sub(r"\s+&\s+", ", ", meio.group(1)), conhecidos)
         principal = (principal[: meio.start()] + principal[meio.end():]).strip()
+    achou = _TITLE_FEAT.search(principal)
+    if achou and achou.start() > 0:
+        # numa lista de participações, "&", "e" e "and" separam; uma dupla conhecida
+        # ("part. Jorge & Mateus") continua inteira porque a comparação ignora a pontuação
+        feat += dividir_artistas(re.sub(r"\s+(?:&|e|and)\s+", ", ", achou.group(1)), conhecidos)
+        principal = (principal[: achou.start()] + principal[achou.end():]).strip()
+    com = _COM.search(principal)
+    if com and com.start() > 0:
+        feat += dividir_artistas(re.sub(r"\s+(?:&|e|and)\s+", ", ", com.group(1)), conhecidos)
+        principal = principal[: com.start()].strip()
 
     principal = principal.strip(" -–—|\"'")
     lados = None
@@ -975,8 +991,15 @@ def analisar_titulo(title: str, conhecidos: Iterable[str] = ()) -> dict[str, Any
     partes = _SEPARADOR_TITULO.split(principal, maxsplit=1)
     if len(partes) == 2 and all(p.strip() for p in partes):
         lados = (partes[0].strip(" \"'"), partes[1].strip(" \"'"))
+        # 'Cult of the Lamb Song - "Fool's Gold" by ivycomb': um lado já diz música e artista
+        for lado in (partes[1].strip(), partes[0].strip()):
+            if (m := _POR.match(lado)):
+                por, lados = (m.group(1).strip(), _sem_parenteses(m.group(2)).strip()), None
+                break
     elif (m := _POR.match(principal)):
-        por = (m.group(1).strip(), m.group(2).strip())
+        por = (m.group(1).strip(), _sem_parenteses(m.group(2)).strip())
+    if por:
+        principal = por[0]  # o nome da música é o que está entre aspas
     return {
         "base": principal,
         "lados": lados,
@@ -1127,7 +1150,16 @@ def hipoteses_youtube(
         yt = dados_youtube_completos(yt)
     canal = avaliar_canal(yt, canal_conhecido, artistas_conhecidos)
     conhecidos = [a for a in artistas_conhecidos if _text(a)]
+    if canal["nome"] and canal["tipo"] != "curador":
+        conhecidos.append(canal["nome"])  # "TheFatRat & NEFFEX" no canal TheFatRat: são dois
     analise = analisar_titulo(yt.get("video_title") or yt.get("title") or "", conhecidos)
+    if not analise["lados"] and canal["nome"] and canal["tipo"] != "curador":
+        # "twenty one pilots: Goner", "My Ordinary Life-The Living Tombstone"
+        for separador in (r"\s*:\s+", r"(?<=\S)-(?=\S)"):
+            partes = re.split(separador, analise["base"], maxsplit=1)
+            if len(partes) == 2 and any(_mesmo_nome(canal["nome"], p) for p in partes):
+                analise["lados"] = (partes[0].strip(), partes[1].strip())
+                break
     feat = analise["feat"]
     hipoteses: dict[tuple, dict[str, Any]] = {}
 
@@ -1186,6 +1218,11 @@ def hipoteses_youtube(
                 add(lado_titulo, artistas, "youtube_titulo_remix_do_canal", 0.85)
         curador = canal["tipo"] == "curador"
         obra = [parece_obra(lado) for lado in lados]
+        if _NUMERO_FAIXA.match(lados[1]):
+            # "INSTINCT - 02. Instinct": "INSTINCT" é o álbum, não o artista (e não conta contra o canal)
+            obra = [True, True]
+            if canal["nome"]:
+                add(_NUMERO_FAIXA.sub("", lados[1]), [canal["nome"]], "youtube_canal_album", 0.7)
         for indice, (lado_artista, lado_titulo, prior) in enumerate(
                 ((lados[0], lados[1], 0.72 if curador else 0.62), (lados[1], lados[0], 0.4 if curador else 0.45))):
             if obra[indice]:
@@ -1199,9 +1236,13 @@ def hipoteses_youtube(
     if analise["por"]:
         titulo, artista = analise["por"]
         add(titulo, dividir_artistas(artista, conhecidos), "youtube_titulo_by", 0.75, bruto=artista)
-    for segmento in analise["segmentos"]:
-        if (canal["nome"] and _mesmo_nome(canal["nome"], segmento)) or conhecido(segmento):
-            add(base, dividir_artistas(segmento, conhecidos), "youtube_titulo_segmento", 0.82, bruto=segmento)
+    for segmento in [] if lados else analise["segmentos"]:  # com "A - B", ele diz mais que o canal
+        limpo = _sem_parenteses(segmento)
+        if canal["nome"] and _mesmo_nome(canal["nome"], limpo):
+            # "Worlds 2017 - League of Legends" no canal League of Legends: o artista é o canal
+            add(base, [canal["nome"]], "youtube_titulo_segmento", 0.82, bruto=canal["nome"])
+        elif conhecido(limpo):
+            add(base, dividir_artistas(limpo, conhecidos), "youtube_titulo_segmento", 0.82, bruto=limpo)
 
     nome = canal["nome"]
     titulo_canal = base if not lados else lados[1]
@@ -1759,6 +1800,7 @@ def resolver_com_prioridade(
                 "youtube_titulo_artista_primeiro": "do título do vídeo (\"Artista - Música\")",
                 "youtube_titulo_artista_depois": "do título do vídeo (\"Música - Artista\")",
                 "youtube_titulo_obra": "do título do vídeo (a outra parte é a série/filme/trilha)",
+                "youtube_canal_album": "do canal, com o título no formato \"Álbum - 02. Música\"",
                 "youtube_canal": "do nome do canal, que pode não ser o artista",
                 "youtube_canal_oficial": "do nome do canal",
                 "youtube_titulo_by": "do título do vídeo",
