@@ -66,6 +66,7 @@ def mostrar_menu(arquivo=None) -> None:
         "  python plpython.py review",
         "  python plpython.py review --ok-all",
         "  python plpython.py metadata --apply",
+        "  python plpython.py spotify && python plpython.py sync -y",
         "",
         "Os arquivos (songs/, playlists/, sql/) são criados na pasta de onde você roda o comando.",
     ]

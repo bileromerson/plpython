@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import patch
 
 import pltube
-import spotify_playlist_viewer
 
 
 class FakeYoutubeDL:
@@ -46,24 +45,6 @@ class PltubeTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
 
-
-    def test_extrair_id_de_playlist_spotify_de_url_uri_e_id(self):
-        playlist_id = "3cEYpjA9oz9GiPac4AsH4n"
-        self.assertEqual(
-            spotify_playlist_viewer.extrair_playlist_id(
-                f"https://open.spotify.com/intl-pt/playlist/{playlist_id}?si=abc"
-            ),
-            playlist_id,
-        )
-        self.assertEqual(
-            spotify_playlist_viewer.extrair_playlist_id(f"spotify:playlist:{playlist_id}"),
-            playlist_id,
-        )
-        self.assertEqual(spotify_playlist_viewer.extrair_playlist_id(playlist_id), playlist_id)
-
-    def test_rejeitar_link_que_nao_seja_playlist_spotify(self):
-        with self.assertRaises(ValueError):
-            spotify_playlist_viewer.extrair_playlist_id("https://open.spotify.com/album/123")
 
     def test_mesmo_video_em_dois_csvs_usa_cache_sem_nova_consulta(self):
         with tempfile.TemporaryDirectory() as temp:

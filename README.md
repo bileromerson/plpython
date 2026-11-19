@@ -6,7 +6,7 @@ Baixa músicas de playlists do YouTube em MP3, identifica artista, álbum e capa
 
 - Python 3.10 ou superior
 - FFmpeg instalado no sistema
-- `pip install -r requirements.txt` (yt-dlp, mutagen, spotipy)
+- `pip install -r requirements.txt` (yt-dlp e mutagen)
 
 O YouTube muda com frequência; mantenha o yt-dlp atualizado com `pip install -U yt-dlp`.
 
@@ -28,10 +28,10 @@ O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é 
 
 | Atalho | Parâmetro | Comandos |
 |---|---|---|
-| `-c` | `--csvfile` | download, update, playlist |
-| `-s` / `-p` | `--songs-dir` / `--playlist-dir` | download, update, review, metadata, revert |
+| `-c` | `--csvfile` | download, update, playlist, sync |
+| `-s` / `-p` | `--songs-dir` / `--playlist-dir` | download, update, review, metadata, revert, sync |
 | `-P` | `--progress` | download, update |
-| `-v` / `-vv` / `-vvv` | `--verbose` | todos, menos spotify e revert |
+| `-v` / `-vv` / `-vvv` | `--verbose` | todos, menos revert |
 | `-w` | `--wait-on-limit` | download, update |
 | `-r` | `--retry` | download |
 | `-db` | `--prefer-db` | download, update |
@@ -39,11 +39,13 @@ O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é 
 | `-nh` | `--no-hybrid` | download, update |
 | `-b` / `-k` | `--cookies-from-browser` / `--cookies` | download, update, playlist |
 | `-a` | `--answer` (review) / `--append` (download, update) | |
-| `-y` | `--default-ok` (review) / `--apply` (metadata, revert) | |
+| `-y` | `--default-ok` (review) / `--apply` (metadata, revert, sync) | |
 | `-A` | `--all-fields` | review |
 | `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review |
 | `-f` | `--sheet` | metadata |
 | `-n` | `--name` | playlist |
+| `-o` / `-L` | `--output` / `--liked` | spotify |
+| `-m` | `--missing` | sync |
 | `-u` / `-l` | `--url-column` / `--log-file` | download, update |
 
 Atalhos de uma letra podem ser juntados: `-Pvv` é o mesmo que `-P -v -v`, e `review -ay` é `--answer --default-ok`.
@@ -64,8 +66,10 @@ pasta onde você rodou/
 ├── csvs/                    ← só lida (é o que -c/--csvfile indica)
 ├── songs/<artista>/…mp3     ← MP3 no artista principal; atalhos nos secundários (-s muda o nome)
 ├── songs/_observar/         ← atalhos das faixas para conferir
-├── playlists/*.m3u          ← uma por CSV (-p muda)
-├── sql/                     ← downloads.sqlite3 (progresso) e musicas.sqlite3 (metadados)
+├── playlists/*.m3u          ← uma por CSV ou por playlist do Spotify (-p muda)
+├── sql/                     ← downloads.sqlite3 (progresso), musicas.sqlite3 (metadados) e m3u_backup/
+├── spotify.csv              ← suas playlists do Spotify (comando spotify)
+├── nao_baixadas.csv         ← o que o sync achou que falta baixar
 ├── Logs.txt                 ← erros
 └── metadados_pendentes.csv  ← planilha de conferência
 ```
@@ -79,7 +83,8 @@ pasta onde você rodou/
 | `update` | relê os CSVs, refaz falhas e reavalia `PENDENTE`/`OBSERVAR` sem baixar de novo o que já existe |
 | `review` | mostra e confirma no terminal as faixas guardadas no SQL; `--answer` corrige uma por uma |
 | `metadata` | aplica as correções feitas na planilha `metadados_pendentes.csv` (simula sem `--apply`) |
-| `spotify` | lista as faixas de uma playlist do Spotify (só consulta) |
+| `spotify` | lê suas playlists do Spotify e salva as músicas em `spotify.csv` (não baixa nada) |
+| `sync` | compara o `spotify.csv` com o que já foi baixado, acerta as M3Us e lista o que falta (simula sem `-y`) |
 | `revert` | converte uma biblioteca no layout antigo `songs/_library` para pastas por artista (simula sem `--apply`) |
 
 ```bash
@@ -107,12 +112,54 @@ python plpython.py review --ok UG1HUOyL9IA
 python plpython.py review --export conferir.csv
 python plpython.py metadata --apply
 
+# Spotify
+python plpython.py spotify -L                             # suas playlists + curtidas → spotify.csv
+python plpython.py sync -y                                # acerta as M3Us e salva nao_baixadas.csv
+
 # outros
-python plpython.py spotify "https://open.spotify.com/playlist/ID"
 python plpython.py revert -s songs --apply
 ```
 
-O `spotify` precisa de um app no Spotify for Developers e das variáveis `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` e `SPOTIFY_REDIRECT_URI`.
+O `spotify` precisa de um app seu no Spotify; veja [Spotify → M3U](#spotify--m3u).
+
+## Spotify → M3U
+
+São dois passos, e nada é baixado. O `spotify` lê as suas playlists e salva tudo em `spotify.csv`: nome da playlist, código da música no Spotify, ISRC, artistas, título e álbum. O `sync` compara esse arquivo com as músicas já baixadas, acerta as M3Us e lista o que falta baixar.
+
+```bash
+python plpython.py spotify --client-id SEU_CLIENT_ID   # 1ª vez: abre o navegador para entrar
+python plpython.py spotify                             # depois, basta isto
+python plpython.py spotify -L                          # inclui as Músicas Curtidas
+python plpython.py sync                                # mostra o que mudaria nas M3Us
+python plpython.py sync -y                             # grava
+```
+
+**Criar o app no Spotify (uma vez):**
+
+1. Entre em https://developer.spotify.com/dashboard com a sua conta e clique em **Create app**.
+2. Em **Redirect URIs**, coloque `http://127.0.0.1:8888/callback` e marque **Web API**.
+3. Copie o **Client ID** e rode `python plpython.py spotify --client-id SEU_CLIENT_ID`. O Client Secret não é usado: o login é feito no navegador, com PKCE.
+
+O login fica salvo em `~/.cache/pltube/spotify_login.json` e é renovado sozinho. Para trocar de conta, use `--login`.
+
+**Regras do Spotify desde 2026** para apps de uso pessoal (modo de desenvolvimento):
+
+- O dono do app precisa ter **Premium**. Outra conta só entra se for cadastrada em *User Management*, nas configurações do app.
+- As faixas só vêm das playlists que **você criou ou em que colabora**. As que você só segue ficam de fora; para incluir uma, copie as músicas dela para uma playlist sua.
+- `localhost` não é aceito como endereço de retorno; use `127.0.0.1`.
+
+**O que o `spotify` mostra:** o que entrou (+) e o que saiu (−) de cada playlist desde a última leitura. As playlists que não mudaram (mesmo `snapshot_id`) são copiadas da leitura anterior, sem pedir as faixas de novo. Com nomes de playlists (`spotify Rock "Pop 2024"`), lê só essas, lista as músicas delas e mantém as outras como estavam no CSV.
+
+**O que o `sync` faz em cada playlist:**
+
+- As músicas já baixadas entram na M3U (`playlists/<nome>.m3u`), na ordem do Spotify. Se já existe uma M3U com o mesmo nome (sem contar acentos, maiúsculas e emojis), ela é usada; senão, uma nova é criada.
+- O que está na M3U mas saiu da playlist do Spotify sai da M3U (`--keep-extra` mantém). Nenhum MP3 é apagado.
+- A música é reconhecida pelo ISRC. Sem ISRC, pelo título com artista compatível, ignorando o que não muda a música ("- Remastered 2011", "(feat. …)", "(Radio Edit)"). Se ainda não achar, por um título quase igual do mesmo artista e com duração parecida. Remix, ao vivo, acústico e "Taylor's Version" contam como outra música.
+- `?` **conferir**: a música não casou com certeza, mas parece ser uma que já estava na M3U. Ela fica na M3U e aparece para você conferir; corrigindo os dados dela com o `review`, ela passa a casar.
+- As que não estão baixadas vão para `nao_baixadas.csv`, uma linha por música, com as playlists em que aparece, o link do Spotify, um link de busca no YouTube Music e uma dica quando você tem outra versão ou outra música com o mesmo título.
+- Sem `-y`, só mostra. Com `-y`, grava e guarda as M3Us antigas em `sql/m3u_backup/`.
+
+O `download`, o `update` e o `review` regravam as M3Us a partir dos CSVs do YouTube. Por isso, rode o `sync` depois deles.
 
 ## Como a música é identificada
 
@@ -324,13 +371,14 @@ Exemplo de `-v`:
 ```
 plpython.py              ← único ponto de entrada: mostra o menu e encaminha cada comando
 comandos/                ← um arquivo por comando: opções, ajuda e exemplos
-├── playlist.py  download.py  update.py  review.py  metadata.py  spotify.py  revert.py
+├── playlist.py  download.py  update.py  review.py  metadata.py  spotify.py  sync.py  revert.py
 └── _comum.py            ← opções compartilhadas (pastas, bancos, conta, -v)
 pltube.py                ← motor do download: YouTube, pastas, M3U, SQL, tags e capa
 resolvedor_metadados.py  ← identificação: canal x artista, hipóteses, MusicBrainz, álbum, capa
 aplicar_metadados.py     ← aplica a planilha de correções
 reverter_biblioteca.py   ← conversão do layout antigo songs/_library
-spotify_playlist_viewer.py
+spotify_conta.py         ← login no Spotify e leitura das playlists → spotify.csv
+sincronizar_playlists.py ← spotify.csv × biblioteca → M3Us e nao_baixadas.csv
 progresso.py  verbose.py ← barra -P e modo -v
 ```
 
@@ -342,4 +390,4 @@ A lista abaixo contém apenas itens ainda não disponíveis.
 
 - [ ] **Catálogo global da biblioteca:** indexar todos os arquivos locais, seus caminhos, fontes, tags e relações com playlists; permitir filtros como `unknown` e `*` para localizar pendências ou revisar o catálogo completo.
 - [ ] **Backup portátil de metadados:** criar e restaurar um catálogo SQLite com URLs, metadados e referências dos arquivos, sem exigir que os MP3s estejam conectados para consultar o catálogo. Esse backup não conterá o áudio.
-- [ ] **Transferência Spotify → YouTube:** pesquisar correspondências de faixas e gerar uma lista para revisão. O visualizador atual não faz essa conversão.
+- [ ] **Baixar o que falta do Spotify:** procurar no YouTube as músicas de `nao_baixadas.csv` e baixá-las sozinho. Hoje o `sync` lista as que faltam, com um link de busca para cada uma.

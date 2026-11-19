@@ -43,6 +43,7 @@ _CORES_AREA = {
     "Arquivo": "33",         # amarelo
     "Pausa": "2",            # apagado
     "yt-dlp": "2",
+    "Spotify": "92",         # verde claro
 }
 # Destaques dentro da mensagem.
 _DESTAQUES = (
@@ -97,6 +98,11 @@ def cor_ativa() -> bool:
 
 def _pintar(texto: str, codigo: str) -> str:
     return f"\033[{codigo}m{texto}\033[0m"
+
+
+def colorir(texto: str, codigo: str) -> str:
+    """Pinta um trecho de qualquer saída, só quando há cor (mesmas regras do -v)."""
+    return _pintar(texto, codigo) if cor_ativa() else texto
 
 
 def _colorir(area: str, mensagem: str, tempo: str) -> tuple[str, str, str]:

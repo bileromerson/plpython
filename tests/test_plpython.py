@@ -95,8 +95,11 @@ class PlpythonCliTests(unittest.TestCase):
     def test_revert_e_spotify(self):
         args = self._capturar("reverter_biblioteca", ["revert", "-s", "m", "--apply"])
         self.assertEqual((args.root, args.apply), ("m", True))
-        args = self._capturar("spotify_playlist_viewer", ["spotify", "abc"])
-        self.assertEqual(args.playlist, "abc")
+        args = self._capturar("spotify_conta", ["spotify", "abc", "-L", "-o", "x.csv"])
+        self.assertEqual((args.playlists, args.liked, args.output), (["abc"], True, "x.csv"))
+        args = self._capturar("sincronizar_playlists", ["sync", "Rock", "-y", "--keep-extra"])
+        self.assertEqual((args.playlists, args.apply, args.manter_extras, args.csvfile),
+                         (["Rock"], True, True, "spotify.csv"))
 
 
 if __name__ == "__main__":
