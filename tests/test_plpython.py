@@ -61,6 +61,25 @@ class PlpythonCliTests(unittest.TestCase):
             self.assertEqual(args.lista, [arquivo])
             self.assertEqual(args.base_dir, temp)
 
+    def test_exige_comando_antes_das_opcoes(self):
+        import contextlib, io
+        with patch("pltube.executar") as fake, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(plpython.main(["-c", "csvs"]), 2)
+            self.assertEqual(plpython.main(["csvs/a.csv"]), 2)
+        fake.assert_not_called()
+
+    def test_help_lista_comandos(self):
+        import contextlib, io
+        saida = io.StringIO()
+        with contextlib.redirect_stdout(saida):
+            self.assertEqual(plpython.main(["help"]), 0)
+            self.assertEqual(plpython.main([]), 2)
+        for comando in ("download", "update", "metadata", "review", "spotify", "revert"):
+            self.assertIn(comando, saida.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as ajuda, self.assertRaises(SystemExit):
+            plpython.main(["help", "download"])
+        self.assertIn("--csvfile", ajuda.getvalue())
+
     def test_update_forca_retry(self):
         args = self._capturar("pltube", ["update", "-c", "x"])
         self.assertTrue(args.reprocess)

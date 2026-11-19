@@ -19,6 +19,20 @@ import os
 import sys
 
 EXEMPLOS = """\
+o comando vem sempre primeiro, depois as opções dele:
+  python plpython.py COMANDO [opções do comando]
+
+principais opções de cada comando (veja tudo com: plpython.py help COMANDO):
+  download / update   CSV...  -c/--csvfile  -s/--songs-dir  -p/--playlist-dir
+                      -u/--url-column  -a/--append  --artist-links  --wait-on-limit
+                      --hybrid  --prefer-db  --review all|diff|none  --no-review
+                      --require-isrc  --require-mb-artist  (download também: --retry)
+  metadata            --sheet  --apply  -s  -p
+  review              --status  --busca  -d  --ok ID...  --ok-all  --export  --sql
+  spotify             PLAYLIST
+  revert              -s  -p  --downloads-db  --apply
+  legacy-centralize   -s  --apply
+
 exemplos:
   python plpython.py download -c ./csvs
   python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links
@@ -113,11 +127,13 @@ def _opcoes_download(p: argparse.ArgumentParser, *, update: bool) -> None:
 def criar_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="plpython.py",
+        usage="plpython.py COMANDO [opções]   (ajuda: plpython.py help [COMANDO])",
         description="Playlists do YouTube → MP3 + M3U, com revisão de metadados.",
         epilog=EXEMPLOS,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="comando", metavar="COMANDO", required=True)
+    sub = parser.add_subparsers(dest="comando", metavar="COMANDO", required=True, title="comandos",
+                                prog="plpython.py")
     fmt = argparse.RawDescriptionHelpFormatter
 
     p = sub.add_parser("download", aliases=["baixar"], formatter_class=fmt,
@@ -200,14 +216,44 @@ def criar_parser() -> argparse.ArgumentParser:
                    help="pasta das músicas (padrão: songs)")
     _oculto(p, "--root", dest="root")
     p.add_argument("--apply", action="store_true", help="aplica; sem isto só simula")
+    for item in [parser, *sub.choices.values()]:
+        item._optionals.title = "opções"
+        item._positionals.title = "argumentos"
+        for acao in item._actions:
+            if isinstance(acao, argparse._HelpAction):
+                acao.help = "mostra esta ajuda e sai"
     return parser
 
 
 _ALIASES = {"revisar": "review", "baixar": "download", "atualizar": "update", "metadados": "metadata", "reverter": "revert"}
 
 
+_COMANDOS = ("download", "baixar", "update", "atualizar", "metadata", "metadados",
+             "review", "revisar", "spotify", "revert", "reverter", "legacy-centralize")
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = criar_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = criar_parser()
+
+    # `plpython.py`, `plpython.py help` e `plpython.py help download`
+    if not argv or argv[0] in ("help", "ajuda"):
+        if len(argv) > 1 and argv[1] in _COMANDOS:
+            parser.parse_args([argv[1], "-h"])  # mostra a ajuda do comando e sai
+        parser.print_help()
+        return 0 if argv else 2
+
+    # Toda ação exige um comando antes das opções: nada é baixado por engano.
+    if argv[0] not in _COMANDOS and argv[0] not in ("-h", "--help"):
+        print(f"Comando ausente ou desconhecido: {argv[0]!r}\n", file=sys.stderr)
+        print("Escreva o comando primeiro e depois as opções dele, por exemplo:", file=sys.stderr)
+        print("  python plpython.py download -c csvs --hybrid", file=sys.stderr)
+        print("  python plpython.py review\n", file=sys.stderr)
+        print("Comandos: download, update, metadata, review, spotify, revert, legacy-centralize", file=sys.stderr)
+        print("Ajuda: python plpython.py help  |  python plpython.py help download", file=sys.stderr)
+        return 2
+
+    args = parser.parse_args(argv)
     comando = _ALIASES.get(args.comando, args.comando)
 
     if comando in ("download", "update"):
