@@ -18,7 +18,7 @@ from comandos._comum import ativar_verbose, opcoes_verbose, cookies_ytdlp, descr
 NOME = "playlist"
 APELIDOS = ("importar",)
 RESUMO = "cria CSVs das suas playlists do YouTube (privadas, curtidas, assistir mais tarde)"
-OPCOES = "URL|mine|liked|watch-later...  -c/--csvfile  --name  --cookies-from-browser  --cookies"
+OPCOES = "URL|mine|liked|watch-later...  -c/--csvfile  -n/--name  -b/--cookies-from-browser  -k/--cookies"
 EXEMPLOS = """\
   plpython.py playlist mine --cookies-from-browser firefox      # todas as suas playlists
   plpython.py playlist liked --cookies-from-browser firefox     # vídeos curtidos
@@ -50,7 +50,7 @@ def criar_parser(prog: str = "plpython.py playlist") -> argparse.ArgumentParser:
                         "watch-later (assistir mais tarde)")
     p.add_argument("-c", "--csvfile", dest="pasta", default="csvs", metavar="PASTA",
                    help="pasta onde salvar os CSVs (padrão: ./csvs)")
-    p.add_argument("--name", dest="nome", metavar="NOME",
+    p.add_argument("-n", "--name", dest="nome", metavar="NOME",
                    help="nome do CSV (só com uma playlist; padrão: o título da playlist)")
     p.add_argument("--include-unavailable", dest="incluir_indisponiveis", action="store_true",
                    help="mantém vídeos privados/apagados no CSV (padrão: ficam de fora)")

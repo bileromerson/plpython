@@ -24,6 +24,37 @@ python plpython.py update -c csvs                   # depois: tenta de novo falh
 
 O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é executado.
 
+### Atalhos dos parâmetros mais usados
+
+| Atalho | Parâmetro | Comandos |
+|---|---|---|
+| `-c` | `--csvfile` | download, update, playlist |
+| `-s` / `-p` | `--songs-dir` / `--playlist-dir` | download, update, review, metadata, revert |
+| `-P` | `--progress` | download, update |
+| `-v` / `-vv` / `-vvv` | `--verbose` | todos, menos spotify e revert |
+| `-w` | `--wait-on-limit` | download, update |
+| `-r` | `--retry` | download |
+| `-db` | `--prefer-db` | download, update |
+| `-nr` | `--no-review` | download, update |
+| `-nh` | `--no-hybrid` | download, update |
+| `-b` / `-k` | `--cookies-from-browser` / `--cookies` | download, update, playlist |
+| `-a` | `--answer` (review) / `--append` (download, update) | |
+| `-y` | `--default-ok` (review) / `--apply` (metadata, revert) | |
+| `-A` | `--all-fields` | review |
+| `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review |
+| `-f` | `--sheet` | metadata |
+| `-n` | `--name` | playlist |
+| `-u` / `-l` | `--url-column` / `--log-file` | download, update |
+
+Atalhos de uma letra podem ser juntados: `-Pvv` é o mesmo que `-P -v -v`, e `review -ay` é `--answer --default-ok`.
+
+```bash
+python plpython.py download -c csvs -Pw -b firefox     # progresso, espera bloqueio, conta do Google
+python plpython.py update -c csvs -P -nr               # atualiza sem lista de conferência
+python plpython.py review -ay                          # responde, aceitando o que ficar em branco
+python plpython.py metadata -y                         # aplica a planilha
+```
+
 ## Pastas
 
 Os arquivos são criados **na pasta de onde você roda o comando**, não na pasta do programa:

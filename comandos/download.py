@@ -17,9 +17,9 @@ from comandos._comum import (
 NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
-OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --no-artist-links\n"
-          "-P/--progress  --wait-on-limit  --sleep  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
-          "--require-isrc  --require-mb-artist  --cookies-from-browser  --cookies  -v/-vv/-vvv")
+OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  -P/--progress  -v/-vv/-vvv\n"
+          "-w/--wait-on-limit  -r/--retry  -db/--prefer-db  -nr/--no-review  -nh/--no-hybrid  --review\n"
+          "-b/--cookies-from-browser  -k/--cookies  --sleep  --no-artist-links  --require-isrc  --require-mb-artist")
 EXEMPLOS = """\
   plpython.py download -c ./csvs                      # identifica artista, álbum e capa
   plpython.py download -c ./csvs/Alone.csv            # só uma playlist
@@ -59,7 +59,7 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("--no-artist-links", dest="artist_links", action="store_false", default=True,
                    help="não cria atalhos nas pastas dos artistas secundários "
                         "(padrão: o MP3 fica no artista principal e os outros recebem um atalho)")
-    p.add_argument("--wait-on-limit", dest="esperar_bloqueio", action="store_true",
+    p.add_argument("-w", "--wait-on-limit", dest="esperar_bloqueio", action="store_true",
                    help="se o YouTube bloquear, espera sozinho e tenta de novo: limite da sessão "
                         "(dura até 1 h) 5, 15, 30 e 60 min; falha de rede 30 s até 10 min")
     p.add_argument("-P", "--progress", dest="progresso", action="store_true",
@@ -70,27 +70,27 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
                         "(padrão: 5-10, como recomenda o yt-dlp; o tempo do download já conta). "
                         "0 desliga")
     if not update:
-        p.add_argument("--retry", dest="reprocess", action="store_true",
+        p.add_argument("-r", "--retry", dest="reprocess", action="store_true",
                        help="tenta de novo itens que falharam (o comando update já faz isso)")
     p.add_argument("-l", "--log-file", dest="log_file", metavar="ARQ",
                    help="arquivo de log de erros (padrão: ./Logs.txt)")
 
     h = p.add_argument_group("identificação de artista, álbum e capa (ligada por padrão)")
-    h.add_argument("--no-hybrid", dest="modelo_hibrido", action="store_false", default=True,
+    h.add_argument("-nh", "--no-hybrid", dest="modelo_hibrido", action="store_false", default=True,
                    help="desliga a identificação: usa só os dados do YouTube, sem MusicBrainz, "
                         "capa do álbum nem lista de conferência (mais rápido)")
     h.add_argument("--require-isrc", dest="exigir_isrc", action="store_true",
                    help="deixa pendente faixa sem ISRC confirmado")
     h.add_argument("--require-mb-artist", dest="exigir_artista_musicbrainz", action="store_true",
                    help="exige artista confirmado pelo MusicBrainz")
-    h.add_argument("--prefer-db", dest="preferir", action="store_const", const="musicbrainz",
+    h.add_argument("-db", "--prefer-db", dest="preferir", action="store_const", const="musicbrainz",
                    default="youtube",
                    help="se YouTube e MusicBrainz divergirem, usa o MusicBrainz (padrão: YouTube); "
                         "a divergência continua indo para a lista")
     h.add_argument("--review", dest="revisar", choices=["all", "diff", "none"], default="all",
                    help="o que marcar como OBSERVAR: all = divergências + dados só do YouTube (padrão); "
                         "diff = só divergências; none = não marca nada")
-    h.add_argument("--no-review", dest="revisar", action="store_const", const="none",
+    h.add_argument("-nr", "--no-review", dest="revisar", action="store_const", const="none",
                    help="atalho para --review none: segue direto sem lista de conferência")
 
     opcoes_verbose(p)

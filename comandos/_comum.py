@@ -50,14 +50,14 @@ def opcoes_conta(p: argparse.ArgumentParser) -> None:
         "conta do Google (playlists privadas, curtidas, vídeos restritos a quem está logado)"
     )
     g.add_argument(
-        "--cookies-from-browser", dest="cookies_navegador", metavar="NAVEGADOR[:PERFIL]",
+        "-b", "--cookies-from-browser", dest="cookies_navegador", metavar="NAVEGADOR[:PERFIL]",
         default=os.environ.get("PLPYTHON_COOKIES_FROM_BROWSER") or None,
         help="usa a conta já logada no navegador; recomendado: firefox. Chrome/Edge/Brave no "
              "Windows costumam falhar (criptografia app-bound). Também lido da variável "
              "PLPYTHON_COOKIES_FROM_BROWSER",
     )
     g.add_argument(
-        "--cookies", dest="cookies_arquivo", metavar="ARQUIVO.txt",
+        "-k", "--cookies", dest="cookies_arquivo", metavar="ARQUIVO.txt",
         default=os.environ.get("PLPYTHON_COOKIES") or None,
         help="arquivo cookies.txt (formato Netscape) exportado do youtube.com; também lido da "
              "variável PLPYTHON_COOKIES. Guarde-o com cuidado: dá acesso à sua conta",

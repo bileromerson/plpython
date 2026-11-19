@@ -9,7 +9,7 @@ from comandos._comum import novo_parser, traduzir_ajuda
 NOME = "revert"
 APELIDOS = ("reverter",)
 RESUMO = "move MP3s de songs/_library de volta para as pastas dos artistas"
-OPCOES = "-s  -p  --downloads-db  --apply"
+OPCOES = "-y/--apply  -s  -p  --downloads-db"
 EXEMPLOS = """\
   plpython.py revert -s songs                 # simula
   plpython.py revert -s songs --apply
@@ -25,7 +25,7 @@ def criar_parser(prog: str = "plpython.py revert") -> argparse.ArgumentParser:
                    help="pasta das M3Us (padrão: playlists ao lado da pasta de músicas)")
     p.add_argument("--downloads-db", dest="state_file", metavar="ARQ",
                    help="banco do download para recuperar a ordem dos artistas (autodetectado)")
-    p.add_argument("--apply", action="store_true", help="aplica; sem isto só simula")
+    p.add_argument("-y", "--apply", action="store_true", help="aplica; sem isto só simula")
     return traduzir_ajuda(p)
 
 
