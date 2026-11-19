@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from comandos._comum import novo_parser, oculto, traduzir_ajuda
+from comandos._comum import novo_parser, traduzir_ajuda
 
 NOME = "revert"
 APELIDOS = ("reverter",)
@@ -21,12 +21,10 @@ def criar_parser(prog: str = "plpython.py revert") -> argparse.ArgumentParser:
                           "links para colaboradores e corrige as M3Us. Simula sem --apply.", EXEMPLOS)
     p.add_argument("-s", "--songs-dir", dest="root", default="songs", metavar="PASTA",
                    help="pasta das músicas (padrão: songs)")
-    oculto(p, "--root", dest="root")
     p.add_argument("-p", "--playlist-dir", metavar="PASTA",
                    help="pasta das M3Us (padrão: playlists ao lado da pasta de músicas)")
     p.add_argument("--downloads-db", dest="state_file", metavar="ARQ",
                    help="banco do download para recuperar a ordem dos artistas (autodetectado)")
-    oculto(p, "--state-file", dest="state_file")
     p.add_argument("--apply", action="store_true", help="aplica; sem isto só simula")
     return traduzir_ajuda(p)
 

@@ -226,8 +226,9 @@ class AplicarMetadadosTests(unittest.TestCase):
         self.assertEqual(saved["result"]["metadata"]["album"], "")
         self.assertEqual(saved["result"]["status"], "RESOLVIDO")
 
-    def test_main_usa_pasta_de_execucao_e_ignora_basedir(self):
-        with tempfile.TemporaryDirectory() as base, tempfile.TemporaryDirectory() as csvs:
+    def test_comando_metadata_usa_a_pasta_de_execucao(self):
+        import plpython
+        with tempfile.TemporaryDirectory() as base:
             antigo = os.getcwd()
             os.chdir(base)
             try:
@@ -237,7 +238,7 @@ class AplicarMetadadosTests(unittest.TestCase):
                     "aplicar_revisoes",
                     return_value={"erros": 0},
                 ) as aplicar:
-                    resultado = aplicar_metadados.main(["--BaseDir", csvs])
+                    resultado = plpython.main(["metadata"])
             finally:
                 os.chdir(antigo)
 

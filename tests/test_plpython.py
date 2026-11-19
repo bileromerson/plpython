@@ -14,21 +14,21 @@ class PlpythonCliTests(unittest.TestCase):
     def test_download_com_varios_csvs_e_opcoes(self):
         args = self._capturar("pltube", [
             "download", "a.csv", "b.csv", "-c", "base", "-u", "-1",
-            "--artist-links", "--wait-on-limit", "--require-isrc",
+            "--wait-on-limit", "--require-isrc",
         ])
         self.assertEqual(args.lista, [os.path.abspath("a.csv"), os.path.abspath("b.csv")])
         self.assertEqual(args.base_dir, "base")
         self.assertEqual(args.work_dir, os.getcwd())
         self.assertEqual(args.row, -1)
         self.assertTrue(args.artist_links and args.esperar_bloqueio)
-        self.assertTrue(args.modelo_hibrido)  # implícito por --require-isrc
+        self.assertTrue(args.modelo_hibrido)  # identificação ligada por padrão
         self.assertFalse(args.reprocess)
 
     def test_prioridades_de_metadados(self):
         args = self._capturar("pltube", ["download", "--prefer-db", "--no-review"])
         self.assertEqual((args.preferir, args.revisar), ("musicbrainz", "none"))
         self.assertTrue(args.modelo_hibrido)
-        args = self._capturar("pltube", ["download", "--hybrid"])
+        args = self._capturar("pltube", ["download"])
         self.assertEqual((args.preferir, args.revisar), ("youtube", "all"))
         args = self._capturar("pltube", ["download", "--review", "diff"])
         self.assertEqual(args.revisar, "diff")
@@ -50,7 +50,8 @@ class PlpythonCliTests(unittest.TestCase):
                 self.assertEqual(os.path.realpath(pltube.WORK_DIR), real)
             finally:
                 os.chdir(antigo)
-                pltube.verificar_diretorios(pltube.criar_parser().parse_args([]))
+                from comandos import download
+                pltube.verificar_diretorios(download.criar_parser().parse_args([]))
 
     def test_csvfile_aceita_arquivo_unico(self):
         import tempfile
@@ -85,14 +86,6 @@ class PlpythonCliTests(unittest.TestCase):
         self.assertTrue(args.reprocess)
         self.assertEqual(args.lista, [])
 
-    def test_nomes_antigos_continuam_aceitos(self):
-        args = self._capturar("pltube", [
-            "baixar", "--BaseDir", "x", "--lista", "y.csv", "--row", "3",
-            "--modelo-hibrido", "--state-file", "s.db",
-        ])
-        self.assertEqual((args.base_dir, args.lista, args.row), ("x", [os.path.abspath("y.csv")], 3))
-        self.assertTrue(args.modelo_hibrido)
-        self.assertEqual(args.state_file, "s.db")
 
     def test_metadata_simula_por_padrao(self):
         args = self._capturar("aplicar_metadados", ["metadata", "--sheet", "r.csv"])

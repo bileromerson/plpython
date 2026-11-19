@@ -65,7 +65,8 @@ class ContaTests(unittest.TestCase):
         with patch.object(pltube, "COOKIES_YTDLP", {}):
             pltube.verificar_diretorios(args)
             self.assertEqual(pltube.COOKIES_YTDLP, {"cookiesfrombrowser": ("firefox", None, None, None)})
-            pltube.verificar_diretorios(pltube.criar_parser().parse_args([]))
+            from comandos import download
+            pltube.verificar_diretorios(download.criar_parser().parse_args([]))
 
     def test_dica_quando_o_video_exige_login(self):
         saida = io.StringIO()

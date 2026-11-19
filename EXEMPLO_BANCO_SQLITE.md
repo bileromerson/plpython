@@ -1,6 +1,6 @@
-# Exemplo dos dois bancos SQLite do pltube
+# Exemplo dos dois bancos SQLite do plpython
 
-O downloader mantém dois arquivos dentro de `<BaseDir>/sql/` por padrão:
+O downloader mantém dois arquivos dentro de `sql/`, na pasta de onde você roda o `plpython.py`:
 
 - `downloads.sqlite3`: fila, progresso e relações com CSVs/playlists.
 - `musicas.sqlite3`: cadastro estruturado de faixas e detalhes de resolução de metadados.
@@ -44,7 +44,7 @@ Esta tabela é utilizada para reutilizar informação de vídeos sem nova consul
 |---|---|---:|---:|---:|
 | `MinhaPlaylist.csv` | `1840:1731870000000000000` | 12 | 0 | 40 |
 
-O caminho do CSV é relativo à pasta definida por `--BaseDir`. `next_row` indica a próxima linha a processar; `complete` é `1` quando o CSV terminou. A assinatura ajuda o programa a perceber se o CSV foi alterado.
+O caminho do CSV é relativo à pasta indicada por `-c/--csvfile`. `next_row` indica a próxima linha a processar; `complete` é `1` quando o CSV terminou. A assinatura ajuda o programa a perceber se o CSV foi alterado.
 
 ### `playlist_items` — faixas associadas a cada CSV
 
@@ -146,3 +146,19 @@ con.close()
 Mover `csvs/`, `songs/` e `sql/` juntos, mantendo a mesma estrutura relativa, preserva os caminhos. Mover só o banco ou só a biblioteca exige ajustar a estrutura ou reconfigurar os caminhos correspondentes.
 
 Apagar os bancos remove cache, progresso e metadados locais, mas não apaga CSVs nem MP3s. O antigo `pltube_state.sqlite3` é mantido após migração para que haja uma cópia de segurança.
+
+## Conferência e memória (em `musicas.sqlite3`)
+
+- `music_tracks.metadata_status`: `RESOLVIDO`, `OBSERVAR` (conferir) ou `PENDENTE` (falta artista ou um requisito `--require-*`).
+- `music_tracks.review_note`: o motivo da conferência, por exemplo "título diverge: YouTube='…' / MusicBrainz='…'" ou "álbum não encontrado".
+- `channel_votes`: o que o programa aprendeu sobre cada canal. É um voto por vídeo confirmado: `artista` (o canal é do artista) ou `curador` (re-upload/gravadora/lyrics). A maioria decide.
+
+```bash
+sqlite3 sql/musicas.sqlite3 \
+  "SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status = 'OBSERVAR';"
+sqlite3 sql/musicas.sqlite3 \
+  "SELECT channel_name, kind, COUNT(*) FROM channel_votes GROUP BY channel_key, kind;"
+```
+
+Sem o programa `sqlite3`, use `python plpython.py review --sql "SELECT ..."`.
+

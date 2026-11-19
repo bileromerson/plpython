@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, oculto, opcoes_bancos, opcoes_pastas, traduzir_ajuda
+from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, opcoes_bancos, opcoes_pastas, traduzir_ajuda
 
 NOME = "metadata"
 APELIDOS = ("metadados",)
@@ -23,7 +23,6 @@ def criar_parser(prog: str = "plpython.py metadata") -> argparse.ArgumentParser:
     opcoes_pastas(p)
     p.add_argument("--sheet", dest="arquivo", default="metadados_pendentes.csv", metavar="CSV",
                    help="planilha revisada (padrão: ./metadados_pendentes.csv)")
-    oculto(p, "--arquivo", dest="arquivo")
     p.add_argument("--apply", action="store_true", help="grava as mudanças; sem isto só simula")
     opcoes_bancos(p)
     opcoes_verbose(p)
@@ -34,8 +33,7 @@ def executar(args: argparse.Namespace) -> int:
     ativar_verbose(args)
     import aplicar_metadados
 
-    args.base_dir = os.getcwd()
-    args.work_dir = args.base_dir
+    args.base_dir = os.getcwd()  # planilha, sql/ e songs/ ficam na pasta de execução
     return aplicar_metadados.executar(args)
 
 

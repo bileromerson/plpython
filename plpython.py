@@ -9,7 +9,7 @@ e encaminha cada um para o seu próprio arquivo na pasta `comandos/`:
   plpython.py review ...    ->  comandos/review.py
   plpython.py spotify ...   ->  comandos/spotify.py
   plpython.py revert ...    ->  comandos/revert.py
-  plpython.py legacy-centralize ...  ->  comandos/legacy_centralize.py
+  plpython.py playlist ...  ->  comandos/playlist.py
 
 Todas as opções, validações e a ajuda de cada comando ficam no arquivo dele.
 """

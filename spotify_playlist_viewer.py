@@ -148,14 +148,6 @@ def mostrar_playlist(playlist_id: str) -> None:
     print(f"\nTotal de faixas exibidas: {numero}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Consulta e exibe faixas de uma playlist Spotify; não baixa áudio."
-    )
-    parser.add_argument("playlist", help="URL, URI ou ID da playlist Spotify")
-    return executar(parser.parse_args(argv))
-
-
 def executar(args: argparse.Namespace) -> int:
     """Consulta a playlist a partir de argumentos já interpretados."""
     try:
@@ -168,7 +160,3 @@ def executar(args: argparse.Namespace) -> int:
         print("\nConsulta cancelada.", file=sys.stderr)
         return 130
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

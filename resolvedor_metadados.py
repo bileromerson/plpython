@@ -1,24 +1,14 @@
-"""Resolvedor híbrido de metadados para integração futura com pltube.
+"""Identificação de música: YouTube x MusicBrainz/Cover Art Archive.
 
-O módulo é independente do downloader: não baixa áudio, não escreve tags, não
-edita SQLite e não cria arquivos. Recebe metadados do yt-dlp, correções locais
-e, opcionalmente, consulta MusicBrainz/Cover Art Archive. Retorna uma
-ResolutionResult com campos, proveniência, candidatos e estado de revisão.
+Usado pelo downloader (pltube.py) através de `resolver_com_prioridade`. Não baixa
+áudio nem escreve arquivos: recebe os metadados do yt-dlp e as correções
+manuais, consulta o MusicBrainz e devolve um ResolutionResult com os campos,
+a origem e a confiança de cada um, o status (RESOLVIDO/OBSERVAR/PENDENTE) e
+as observações para conferência.
 
-Uso mínimo:
-    resultado = resolver_metadados(
-        video_id="abc123",
-        dados_ytdlp={"title": "Faixa", "artists": ["Artista"], "isrc": "USAAA9900001"},
-        correcoes_locais={"abc123": {"status_revisao": "CORRIGIDO", "album_corrigido": "Álbum"}},
-        musicbrainz_client=MusicBrainzClient(),  # reutilize a mesma instância
-    )
-    if resultado.status == "PENDENTE":
-        print(resultado.motivos_pendencia)
-
-MusicBrainz exige um User-Agent identificável e no máximo uma chamada por
-segundo por aplicação/IP. O cliente aplica essa pausa às consultas MusicBrainz.
-A chamada ao Cover Art Archive é separada. Consulte os links no fim deste
-arquivo para a documentação oficial.
+O MusicBrainz exige um User-Agent identificável e no máximo uma consulta por
+segundo; o MusicBrainzClient aplica essa pausa. O Cover Art Archive é
+consultado à parte.
 """
 
 from __future__ import annotations
@@ -242,403 +232,6 @@ class MusicBrainzClient:
             return body
         return None
 
-    def get_front_cover(self, release_id: str) -> str | None:
-        """Retorna URL de thumbnail frontal, sem baixar a imagem."""
-        if not _valid_mbid(release_id):
-            return None
-        url = f"{COVER_ART_API}/release/{release_id}"
-        try:
-            payload = self._get_json(url, rate_limited=False)
-        except MusicBrainzError as exc:
-            if exc.status_code == 404:
-                return None
-            raise
-        images = payload.get("images") or []
-        fronts = [
-            image
-            for image in images
-            if image.get("front") is True or "front" in {
-                str(kind).casefold() for kind in image.get("types", [])
-            }
-        ]
-        if not fronts:
-            return None
-        selected = fronts[0]
-        thumbnails = selected.get("thumbnails") or {}
-        return (
-            thumbnails.get("500")
-            or thumbnails.get("250")
-            or selected.get("image")
-            or None
-        )
-
-
-def resolver_metadados(
-    video_id: str,
-    dados_ytdlp: Mapping[str, Any] | None,
-    correcoes_locais: Mapping[str, Any] | None = None,
-    cache: MutableMapping[str, Any] | None = None,
-    *,
-    musicbrainz_client: MusicBrainzClient | Any | None = None,
-    consultar_musicbrainz: bool = True,
-    campos_obrigatorios: Sequence[str] = ("title", "artists", "album"),
-    limite_candidatos: int = 10,
-    limiar_correspondencia: float = 0.82,
-    margem_correspondencia: float = 0.06,
-    exigir_isrc: bool = False,
-    exigir_artista_musicbrainz: bool = False,
-    dados_locais: Mapping[str, Any] | None = None,
-) -> ResolutionResult:
-    """Combina correções confirmadas, yt-dlp e correspondências do MusicBrainz.
-
-    Ordem prática:
-      1. campos manuais confirmados (status CORRIGIDO/APLICADO/CONFIRMADO);
-      2. correspondência única e forte do MusicBrainz, preferindo ISRC exato;
-      3. dados explícitos do vídeo como valores de origem/sugestão.
-
-    ``uploader``/``channel`` são preservados separadamente e nunca viram
-    artista automaticamente. Uma busca ambígua não escolhe silenciosamente.
-    ``cache`` é um mapping mutável opcional para reutilizar respostas entre
-    chamadas; por padrão, ele é apenas em memória, não persistente.
-
-    ``campos_obrigatorios`` aceita ``title``, ``artists``, ``album`` e
-    ``cover`` (URL ou arquivo local). Artista/álbum oriundos apenas do YouTube
-    permanecem provisórios e deixam a faixa pendente por padrão. Uma linha
-    manual pode listar campos intencionalmente vazios em
-    ``campos_confirmados_vazios``; isso não é confundido com falta de revisão.
-    A thumbnail do YouTube é separada da capa do lançamento.
-    """
-    if not isinstance(dados_ytdlp, Mapping):
-        dados_ytdlp = {}
-    cache = cache if cache is not None else {}
-    manual = _confirmed_manual_record(correcoes_locais, video_id)
-    yt = _extract_youtube_metadata(dados_ytdlp)
-    local = _extract_local_metadata(dados_locais)
-
-    metadata: dict[str, Any] = {
-        "id": _text(video_id) or _text(dados_ytdlp.get("id")),
-        "title": yt["title"] or local["title"],
-        "artists": list(yt["artists"] or local["artists"]),
-        "artist": (yt["artists"] or local["artists"] or [""])[0],
-        "album": yt["album"] or local["album"],
-        "isrc": yt["isrc"] or local["isrc"],
-        "duration": yt["duration"],
-        "uploader": yt["uploader"],
-        "thumbnail_url": yt["thumbnail_url"],
-        "thumbnails": yt["thumbnails"],
-        "cover_url": "",
-        "cover_file": "",
-        "musicbrainz_recording_id": "",
-        "musicbrainz_release_id": "",
-    }
-    provenance: dict[str, str] = {}
-    confidence: dict[str, str] = {}
-    for field_name in ("title", "artists", "album", "isrc", "duration", "thumbnail_url"):
-        if _has_value(yt.get(field_name)):
-            provenance[field_name] = "youtube"
-            confidence[field_name] = "provisoria"
-        elif field_name in local and _has_value(local.get(field_name)):
-            provenance[field_name] = "local"
-            confidence[field_name] = "tag_local_provisoria"
-    if metadata["uploader"]:
-        provenance["uploader"] = "youtube"
-        confidence["uploader"] = "origem_nao_artista"
-    if metadata["thumbnails"]:
-        provenance["thumbnails"] = "youtube"
-
-    candidates: list[dict[str, Any]] = []
-    diagnostics: list[str] = []
-    diagnostics_by_source: dict[str, list[str]] = {
-        "youtube": [],
-        "local": [],
-        "musicbrainz": [],
-    }
-    if not yt["isrc"]:
-        diagnostics_by_source["youtube"].append("yt-dlp/YouTube não forneceu um ISRC válido")
-    if not yt["artists"]:
-        diagnostics_by_source["youtube"].append("yt-dlp/YouTube não forneceu crédito de artista")
-    if local["isrc"] and not yt["isrc"]:
-        diagnostics_by_source["local"].append("ISRC recuperado das tags locais do MP3")
-    if local["title"] or local["artists"] or local["album"]:
-        diagnostics_by_source["local"].append("Metadados locais disponíveis como fallback")
-    ambiguity_reasons: list[str] = []
-    accepted_match = False
-    search_attempted = False
-    saw_musicbrainz_candidates = False
-    release_state = "not_checked"
-    client = musicbrainz_client
-    if consultar_musicbrainz and client is None:
-        client = MusicBrainzClient()
-
-    # Se manualmente já vieram os campos essenciais, não há motivo para rede.
-    cover_required = any(
-        field_name in {"cover", "cover_url", "cover_file"}
-        for field_name in campos_obrigatorios
-    )
-    missing_or_unconfirmed = [
-        field_name
-        for field_name in campos_obrigatorios
-        if field_name not in {"cover", "cover_url", "cover_file"}
-        and not _manual_has_field(manual, field_name)
-    ]
-    should_search = consultar_musicbrainz and (
-        bool(missing_or_unconfirmed)
-        or (cover_required and not _manual_has_field(manual, "cover"))
-    )
-
-    if should_search and client is not None:
-        raw_candidates: list[dict[str, Any]] = []
-        normalized_isrc = normalize_isrc(metadata["isrc"])
-        try:
-            if normalized_isrc:
-                search_attempted = True
-                raw_candidates = _cached_search(
-                    cache,
-                    f"isrc:{normalized_isrc}",
-                    lambda: client.search_by_isrc(normalized_isrc, limit=limite_candidatos),
-                )
-                saw_musicbrainz_candidates = saw_musicbrainz_candidates or bool(raw_candidates)
-                exact = [
-                    item
-                    for item in raw_candidates
-                    if normalized_isrc in {
-                        normalize_isrc(value) for value in item.get("isrcs", [])
-                    }
-                ]
-                if exact:
-                    chosen, ambiguous = _choose_exact_isrc(exact)
-                    if ambiguous:
-                        ambiguity_reasons.append(
-                            "mais de uma gravação corresponde ao mesmo ISRC"
-                        )
-                    elif chosen:
-                        accepted_match = True
-                        _merge_musicbrainz_recording(
-                            metadata,
-                            provenance,
-                            confidence,
-                            chosen,
-                            source_confidence="isrc_exato",
-                            override_youtube=True,
-                        )
-                        release_state = _resolve_release(
-                            metadata,
-                            provenance,
-                            confidence,
-                            chosen,
-                            client,
-                            diagnostics,
-                            manual,
-                        )
-                        candidates = [_public_candidate(chosen, score=1.0)]
-                # Sem correspondência ISRC exata, tenta o par título/artista abaixo.
-            if not accepted_match and not ambiguity_reasons:
-                title = metadata["title"]
-                artists = metadata["artists"]
-                if title:
-                    if artists:
-                        search_key = f"title_artist:{_normalize_text(title)}|{_normalize_text(artists[0])}"
-                        search_operation = lambda: client.search_by_title_artist(
-                            title, artists[0], limit=limite_candidatos
-                        )
-                    else:
-                        search_key = f"title_only:{_normalize_text(title)}"
-                        search_operation = lambda: client.search_by_title(
-                            title, limit=limite_candidatos
-                        )
-                    search_attempted = True
-                    raw_candidates = _cached_search(cache, search_key, search_operation)
-                    saw_musicbrainz_candidates = saw_musicbrainz_candidates or bool(raw_candidates)
-                    ranked = _rank_candidates(
-                        raw_candidates,
-                        title=title,
-                        artists=artists,
-                        duration=metadata["duration"],
-                    )
-                    candidates = [_public_candidate(item[0], score=item[1]) for item in ranked]
-                    chosen, ambiguous = _choose_ranked(
-                        ranked,
-                        threshold=(
-                            max(
-                                limiar_correspondencia,
-                                0.88 if metadata["duration"] > 0 else 0.92,
-                            )
-                            if not artists
-                            else limiar_correspondencia
-                        ),
-                        margin=margem_correspondencia,
-                    )
-                    if ambiguous:
-                        ambiguity_reasons.append(
-                            "várias correspondências plausíveis no MusicBrainz"
-                        )
-                    elif chosen:
-                        accepted_match = True
-                        _merge_musicbrainz_recording(
-                            metadata,
-                            provenance,
-                            confidence,
-                            chosen,
-                            source_confidence="correspondencia_forte",
-                            override_youtube=True,
-                        )
-                        release_state = _resolve_release(
-                            metadata,
-                            provenance,
-                            confidence,
-                            chosen,
-                            client,
-                            diagnostics,
-                            manual,
-                        )
-                        _mark_youtube_fields_validated(
-                            metadata, provenance, confidence, chosen
-                        )
-        except (MusicBrainzError, OSError, ValueError, TimeoutError) as exc:
-            diagnostics.append(f"MusicBrainz indisponível: {exc}")
-            diagnostics_by_source["musicbrainz"].append(
-                f"MusicBrainz indisponível: {exc}"
-            )
-        except Exception as exc:
-            # Um cliente injetado também pode propagar erros de transporte próprios.
-            diagnostics.append(f"Falha na consulta de metadados: {exc}")
-            diagnostics_by_source["musicbrainz"].append(
-                f"Falha na consulta de metadados: {exc}"
-            )
-
-    if search_attempted and not accepted_match and not ambiguity_reasons:
-        mensagem = (
-            "MusicBrainz retornou candidatos, mas nenhum atingiu o limiar de correspondência"
-            if saw_musicbrainz_candidates
-            else "MusicBrainz não encontrou uma correspondência para ISRC/título/artista"
-        )
-        diagnostics_by_source["musicbrainz"].append(mensagem)
-    if accepted_match and provenance.get("artists") == "youtube":
-        diagnostics_by_source["musicbrainz"].append(
-            "MusicBrainz aceitou a gravação, mas não retornou artistas para confirmar o crédito do vídeo"
-        )
-    if should_search and not search_attempted and client is not None and not metadata["title"]:
-        diagnostics_by_source["musicbrainz"].append(
-            "MusicBrainz não foi consultado porque o vídeo não forneceu título"
-        )
-    if ambiguity_reasons:
-        diagnostics_by_source["musicbrainz"].append(
-            "MusicBrainz retornou mais de uma correspondência plausível"
-        )
-
-    # Correções locais confirmadas vencem todos os resultados automáticos.
-    manual_values = _manual_values(manual)
-    for field_name, value in manual_values.items():
-        if not _has_value(value):
-            continue
-        metadata[field_name] = value
-        provenance[field_name] = "manual"
-        confidence[field_name] = "confirmada"
-    for field_name in _manual_empty_fields(manual):
-        if field_name in manual_values:
-            continue
-        targets = ("cover_url", "cover_file") if field_name == "cover" else (field_name,)
-        for target in targets:
-            if target in {"artists", "cover_file"}:
-                metadata[target] = [] if target == "artists" else ""
-            elif target in metadata:
-                metadata[target] = ""
-            provenance[target] = "manual"
-            confidence[target] = "confirmada_vazia"
-    if metadata["artists"]:
-        metadata["artist"] = metadata["artists"][0]
-
-    reasons = list(ambiguity_reasons)
-    if release_state == "ambiguous":
-        if "album" in campos_obrigatorios and not _manual_has_field(manual, "album"):
-            reasons.append("álbum associado a mais de uma edição possível")
-        if cover_required and not _manual_has_field(manual, "cover"):
-            reasons.append("capa de lançamento não pôde ser escolhida sem ambiguidade")
-    elif release_state == "missing" and "album" in campos_obrigatorios:
-        if not _manual_has_field(manual, "album"):
-            reasons.append("nenhum lançamento foi localizado para confirmar o álbum")
-
-    required = set(campos_obrigatorios)
-    for field_name in campos_obrigatorios:
-        if _manual_field_confirmed_empty(manual, field_name) and not (
-            field_name == "isrc" and exigir_isrc
-        ):
-            continue
-        if field_name == "artists":
-            value = metadata.get("artists")
-        elif field_name == "cover":
-            value = metadata.get("cover_url") or metadata.get("cover_file")
-        elif field_name in {"cover_url", "cover_file"}:
-            value = metadata.get("cover_url") or metadata.get("cover_file")
-        else:
-            value = metadata.get(field_name)
-        if not _has_value(value):
-            reasons.append(f"campo obrigatório ausente: {field_name}")
-
-    if "artists" in required and metadata.get("artists") and provenance.get("artists") == "youtube":
-        if not _manual_has_field(manual, "artists"):
-            reasons.append("artista informado somente pelo vídeo, sem confirmação independente")
-    if "title" in required and metadata.get("title") and provenance.get("title") == "youtube":
-        if not _manual_has_field(manual, "title"):
-            reasons.append("título informado somente pelo vídeo, sem confirmação independente")
-    if "album" in required and metadata.get("album") and provenance.get("album") == "youtube":
-        if not accepted_match and not _manual_has_field(manual, "album"):
-            reasons.append("álbum informado somente pelo vídeo, sem lançamento confirmado")
-    for field_name, rotulo in (
-        ("title", "título"), ("artists", "artista"), ("album", "álbum")
-    ):
-        if (
-            field_name in required
-            and _has_value(metadata.get(field_name))
-            and provenance.get(field_name) == "local"
-            and not _manual_has_field(manual, field_name)
-        ):
-            reasons.append(f"{rotulo} veio de tags/estrutura local, sem confirmação independente")
-    if exigir_isrc and metadata.get("isrc") and provenance.get("isrc") not in {
-        "musicbrainz", "manual"
-    }:
-        reasons.append("ISRC disponível, mas não confirmado pelo MusicBrainz ou por revisão manual")
-    if exigir_artista_musicbrainz:
-        fontes_confiaveis_artista = {
-            "musicbrainz", "youtube_validado_musicbrainz", "manual"
-        }
-        if (
-            not metadata.get("artists")
-            or provenance.get("artists") not in fontes_confiaveis_artista
-        ):
-            reasons.append("artista não confirmado pelo MusicBrainz ou por revisão manual")
-            diagnostics_by_source["musicbrainz"].append(
-                "Nenhum artista foi confirmado pelo MusicBrainz"
-            )
-    if cover_required and metadata.get("cover_url") and provenance.get("cover_url") == "youtube_thumbnail_fallback":
-        reasons.append("há apenas thumbnail do vídeo, não capa de lançamento confirmada")
-    if cover_required and not (metadata.get("cover_url") or metadata.get("cover_file")):
-        reasons.append("nenhuma capa de lançamento confirmada")
-
-    # Remover mensagens repetidas preservando a ordem.
-    reasons = list(dict.fromkeys(reasons))
-    status = "PENDENTE" if reasons else "RESOLVIDO"
-    return ResolutionResult(
-        video_id=metadata["id"],
-        status=status,
-        metadata=metadata,
-        provenance=provenance,
-        confidence=confidence,
-        pending_reasons=reasons,
-        candidates=candidates,
-        diagnostics=list(dict.fromkeys(
-            diagnostics
-            + diagnostics_by_source["youtube"]
-            + diagnostics_by_source["musicbrainz"]
-        )),
-        diagnostics_by_source={
-            fonte: list(dict.fromkeys(mensagens))
-            for fonte, mensagens in diagnostics_by_source.items()
-        },
-        source_youtube=yt,
-        source_local=local,
-    )
-
 
 def normalize_isrc(value: Any) -> str:
     """Normaliza ISRC e retorna vazio se não corresponder ao formato de 12 chars."""
@@ -780,60 +373,6 @@ def _manual_values(record: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-def _manual_has_field(record: Mapping[str, Any], field_name: str) -> bool:
-    values = _manual_values(record)
-    empty_fields = _manual_empty_fields(record)
-    if field_name == "cover":
-        return bool(
-            "cover_url" in values
-            or "cover_file" in values
-            or "cover" in empty_fields
-            or "cover_url" in empty_fields
-            or "cover_file" in empty_fields
-        )
-    if field_name == "cover_url" and "cover_file" in values:
-        return True
-    return field_name in values or field_name in empty_fields
-
-
-def _manual_empty_fields(record: Mapping[str, Any]) -> set[str]:
-    raw = record.get("campos_confirmados_vazios", [])
-    if isinstance(raw, str):
-        fields = [part.strip() for part in raw.split("|")]
-    elif isinstance(raw, (list, tuple, set)):
-        fields = [str(part).strip() for part in raw]
-    else:
-        fields = []
-    aliases = {
-        "titulo": "title",
-        "titulo_corrigido": "title",
-        "artista": "artists",
-        "artistas": "artists",
-        "artistas_corrigidos": "artists",
-        "album_corrigido": "album",
-        "isrc_corrigido": "isrc",
-        "capa": "cover",
-        "capa_url": "cover_url",
-        "capa_arquivo": "cover_file",
-    }
-    supported = {"title", "artists", "album", "isrc", "cover", "cover_url", "cover_file"}
-    result = set()
-    for field_name in fields:
-        normalized = aliases.get(field_name.casefold(), field_name.casefold())
-        if normalized in supported:
-            result.add(normalized)
-    return result
-
-
-def _manual_field_confirmed_empty(record: Mapping[str, Any], field_name: str) -> bool:
-    empty_fields = _manual_empty_fields(record)
-    if field_name == "cover":
-        return bool(empty_fields.intersection({"cover", "cover_url", "cover_file"}))
-    if field_name in {"cover_url", "cover_file"}:
-        return bool(empty_fields.intersection({"cover", "cover_url", "cover_file"}))
-    return field_name in empty_fields
-
-
 def _cached_search(
     cache: MutableMapping[str, Any], key: str, search: Callable[[], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -847,112 +386,6 @@ def _cached_search(
     return copy.deepcopy(value) if isinstance(value, list) else []
 
 
-def _merge_musicbrainz_recording(
-    metadata: dict[str, Any],
-    provenance: dict[str, str],
-    confidence: dict[str, str],
-    candidate: Mapping[str, Any],
-    *,
-    source_confidence: str,
-    override_youtube: bool,
-) -> None:
-    if candidate.get("recording_id"):
-        metadata["musicbrainz_recording_id"] = candidate["recording_id"]
-        provenance["musicbrainz_recording_id"] = "musicbrainz"
-        confidence["musicbrainz_recording_id"] = source_confidence
-    if candidate.get("title") and (override_youtube or not metadata.get("title")):
-        metadata["title"] = candidate["title"]
-        provenance["title"] = "musicbrainz"
-        confidence["title"] = source_confidence
-    candidate_artists = _artists(candidate.get("artists"))
-    if candidate_artists and (override_youtube or not metadata.get("artists")):
-        metadata["artists"] = candidate_artists
-        metadata["artist"] = candidate_artists[0]
-        provenance["artists"] = "musicbrainz"
-        confidence["artists"] = source_confidence
-    candidate_isrcs = [normalize_isrc(value) for value in candidate.get("isrcs", [])]
-    candidate_isrcs = [value for value in candidate_isrcs if value]
-    if candidate_isrcs and (override_youtube or not metadata.get("isrc")):
-        metadata["isrc"] = candidate_isrcs[0]
-        provenance["isrc"] = "musicbrainz"
-        confidence["isrc"] = source_confidence
-
-
-def _mark_youtube_fields_validated(
-    metadata: Mapping[str, Any],
-    provenance: dict[str, str],
-    confidence: dict[str, str],
-    candidate: Mapping[str, Any],
-) -> None:
-    """Marca título/créditos do vídeo como corroborados por match forte."""
-    for field_name in ("title", "artists"):
-        if field_name == "artists" and not _artists(candidate.get("artists")):
-            continue
-        if field_name == "title" and not _text(candidate.get("title")):
-            continue
-        if _has_value(metadata.get(field_name)) and provenance.get(field_name) == "youtube":
-            provenance[field_name] = "youtube_validado_musicbrainz"
-            confidence[field_name] = "correspondencia_forte"
-
-
-def _resolve_release(
-    metadata: dict[str, Any],
-    provenance: dict[str, str],
-    confidence: dict[str, str],
-    candidate: Mapping[str, Any],
-    client: Any,
-    diagnostics: list[str],
-    manual: Mapping[str, Any],
-) -> str:
-    """Resolve release/cover e informa se a edição é única, ambígua ou ausente."""
-    releases = [
-        release for release in candidate.get("releases", [])
-        if isinstance(release, Mapping) and _text(release.get("id"))
-    ]
-    by_id: dict[str, Mapping[str, Any]] = {}
-    for release in releases:
-        by_id.setdefault(_text(release.get("id")), release)
-    releases = list(by_id.values())
-    if len(releases) == 1:
-        release = releases[0]
-        release_title = _text(release.get("title"))
-        if release_title and not _manual_has_field(manual, "album"):
-            metadata["album"] = release_title
-            provenance["album"] = "musicbrainz"
-            confidence["album"] = "release_unico"
-        metadata["musicbrainz_release_id"] = _text(release.get("id"))
-        provenance["musicbrainz_release_id"] = "musicbrainz"
-        cover_url = None
-        if not _manual_has_field(manual, "cover_url"):
-            try:
-                cover_url = client.get_front_cover(_text(release.get("id")))
-            except Exception as exc:
-                diagnostics.append(f"Cover Art Archive indisponível: {exc}")
-        if cover_url:
-            metadata["cover_url"] = cover_url
-            provenance["cover_url"] = "cover_art_archive"
-            confidence["cover_url"] = "frontal_do_release"
-        elif metadata.get("thumbnail_url"):
-            # É apenas uma alternativa visual; não a identifica como capa de álbum.
-            metadata["cover_url"] = metadata["thumbnail_url"]
-            provenance["cover_url"] = "youtube_thumbnail_fallback"
-            confidence["cover_url"] = "provisoria"
-        return "unique" if release_title else "missing"
-
-    album_titles = list(dict.fromkeys(
-        _text(release.get("title")) for release in releases if _text(release.get("title"))
-    ))
-    if len(album_titles) == 1:
-        if not _manual_has_field(manual, "album"):
-            metadata["album"] = album_titles[0]
-            provenance["album"] = "musicbrainz"
-            confidence["album"] = "titulo_de_album_compartilhado_por_edicoes"
-        return "ambiguous"
-    if len(album_titles) > 1:
-        return "ambiguous"
-    return "missing"
-
-
 def _choose_exact_isrc(
     candidates: Sequence[Mapping[str, Any]],
 ) -> tuple[Mapping[str, Any] | None, bool]:
@@ -964,52 +397,6 @@ def _choose_exact_isrc(
     if len(unique) == 1:
         return next(iter(unique.values())), False
     return None, len(unique) > 1
-
-
-def _rank_candidates(
-    candidates: Sequence[Mapping[str, Any]],
-    *,
-    title: str,
-    artists: Sequence[str],
-    duration: float,
-) -> list[tuple[Mapping[str, Any], float]]:
-    unique: dict[str, Mapping[str, Any]] = {}
-    for candidate in candidates:
-        recording_id = _text(candidate.get("recording_id"))
-        key = recording_id or json.dumps(candidate, sort_keys=True, ensure_ascii=False)
-        unique.setdefault(key, candidate)
-    ranked = [
-        (candidate, _match_score(candidate, title, artists, duration))
-        for candidate in unique.values()
-    ]
-    ranked.sort(key=lambda item: item[1], reverse=True)
-    return ranked
-
-
-def _match_score(
-    candidate: Mapping[str, Any], title: str, artists: Sequence[str], duration: float
-) -> float:
-    title_score = _similarity(title, _text(candidate.get("title")))
-    candidate_artists = _artists(candidate.get("artists"))
-    artist_score = max(
-        (_similarity(expected, actual) for expected in artists for actual in candidate_artists),
-        default=0.0,
-    )
-    parts = (
-        [(title_score, 0.62), (artist_score, 0.33)]
-        if artists else [(title_score, 0.82)]
-    )
-    candidate_duration = candidate.get("duration")
-    try:
-        candidate_duration = float(candidate_duration or 0)
-    except (TypeError, ValueError):
-        candidate_duration = 0.0
-    if duration > 0 and candidate_duration > 0:
-        delta = abs(duration - candidate_duration)
-        duration_score = max(0.0, 1.0 - delta / 20.0)
-        parts.append((duration_score, 0.05 if artists else 0.18))
-    weight_total = sum(weight for _, weight in parts)
-    return round(sum(score * weight for score, weight in parts) / weight_total, 4)
 
 
 def _choose_ranked(
@@ -1229,7 +616,6 @@ __all__ = [
     "MusicBrainzError",
     "ResolutionResult",
     "normalize_isrc",
-    "resolver_metadados",
 ]
 
 # Documentação oficial:
@@ -1237,8 +623,6 @@ __all__ = [
 # https://musicbrainz.org/doc/MusicBrainz_API/Search/RecordingSearch
 # https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
 # https://musicbrainz.org/doc/Cover_Art_Archive/API
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1346,12 +730,6 @@ def dividir_artistas(texto: str) -> list[str]:
     if len(partes) > 1 or texto.count(" & ") >= 2:
         partes = [p for parte in partes for p in re.split(r"\s+&\s+", parte)]
     return list(dict.fromkeys(p.strip(" .") for p in partes if _text(p.strip(" ."))))
-
-
-def limpar_titulo_youtube(title: str) -> tuple[str, list[str]]:
-    """Remove ruídos ("(Official Video)", "[HD]", "| NCS ...") e separa "feat. X"."""
-    analise = analisar_titulo(title)
-    return analise["base"], analise["feat"]
 
 
 def analisar_titulo(title: str) -> dict[str, Any]:
@@ -1794,6 +1172,7 @@ def resolver_com_prioridade(
     faltando: list[str] = []
     candidatos: list[dict[str, Any]] = []
     escolhido: Mapping[str, Any] | None = None
+    por_isrc = False
     hipotese_escolhida = base
     client = musicbrainz_client
     if consultar_musicbrainz and client is None:
@@ -1811,6 +1190,8 @@ def resolver_com_prioridade(
                 chosen, ambiguous = _choose_exact_isrc(exatos) if exatos else (None, False)
                 if chosen and not ambiguous:
                     escolhido, candidatos = chosen, [_public_candidate(chosen, 1.0)]
+                    por_isrc = True
+                    v("MusicBrainz", f"ISRC {isrc} identifica a gravação exata")
             if escolhido is None:
                 melhor: tuple | None = None
                 tentativas = 0
@@ -1880,6 +1261,9 @@ def resolver_com_prioridade(
             if not mb_val:
                 continue
             iguais = _mesmos_artistas(yt_val, mb_val) if campo == "artists" else _mesmo_texto(yt_val, mb_val)
+            if por_isrc and not explicita:
+                # ISRC exato prova que é a mesma gravação; o título do vídeo é só um palpite.
+                iguais = True
             mostrar = (lambda x: " & ".join(x)) if campo == "artists" else (lambda x: x)
             if not yt_val or iguais:
                 metadata[campo] = mb_val

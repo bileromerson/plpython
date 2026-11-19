@@ -25,18 +25,11 @@ def traduzir_ajuda(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
-def oculto(parser: argparse.ArgumentParser, *nomes: str, **kwargs) -> None:
-    """Aceita nomes antigos sem mostrá-los na ajuda (compatibilidade)."""
-    parser.add_argument(*nomes, help=argparse.SUPPRESS, **kwargs)
-
-
 def opcoes_pastas(p: argparse.ArgumentParser) -> None:
     p.add_argument("-s", "--songs-dir", dest="songs_dir", metavar="PASTA",
                    help="pasta das músicas (padrão: ./songs)")
     p.add_argument("-p", "--playlist-dir", dest="playlist_dir", metavar="PASTA",
                    help="pasta das M3Us (padrão: ./playlists)")
-    oculto(p, "--SongsDir", dest="songs_dir")
-    oculto(p, "--PlaylistDir", dest="playlist_dir")
 
 
 def opcoes_bancos(p: argparse.ArgumentParser) -> argparse._ArgumentGroup:
@@ -45,7 +38,6 @@ def opcoes_bancos(p: argparse.ArgumentParser) -> argparse._ArgumentGroup:
                    help="fila/progresso de downloads (padrão: ./sql/downloads.sqlite3)")
     g.add_argument("--metadata-db", default=os.path.join("sql", "musicas.sqlite3"), metavar="ARQ",
                    help="metadados das faixas (padrão: ./sql/musicas.sqlite3)")
-    oculto(p, "--state-file", dest="downloads_db")
     return g
 
 

@@ -88,8 +88,8 @@ class PrioridadeTests(unittest.TestCase):
         self.assertEqual(res.status, "PENDENTE")
 
     def test_limpeza_de_titulo(self):
-        self.assertEqual(r.limpar_titulo_youtube("Song (Official Music Video) [HD] ft. X & Y"),
-                         ("Song", ["X", "Y"]))
+        analise = r.analisar_titulo("Song (Official Music Video) [HD] ft. X & Y")
+        self.assertEqual((analise["base"], analise["feat"]), ("Song", ["X", "Y"]))
         h = r.hipoteses_youtube({"title": "Track", "uploader": "Band - Topic", "artists": []})
         self.assertEqual((h[0]["artists"], h[0]["origem"]), (["Band"], "youtube_canal_topic"))
 

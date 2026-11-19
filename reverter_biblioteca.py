@@ -560,26 +560,6 @@ def reverter(
     return resultado
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Reverte songs/_library para MP3 físico no artista principal e links nos colaboradores."
-    )
-    parser.add_argument("--root", default="songs", help="Pasta de músicas (padrão: songs)")
-    parser.add_argument(
-        "--playlist-dir",
-        help="Pasta das playlists M3U (padrão: pasta irmã playlists, ao lado de songs)",
-    )
-    parser.add_argument(
-        "--state-file",
-        help="Banco SQLite do pltube para recuperar a ordem original dos artistas (autodetectado ao lado de songs)",
-    )
-    parser.add_argument(
-        "--apply", action="store_true",
-        help="Aplica movimentos/links e atualiza M3Us; sem esta opção, só simula.",
-    )
-    return executar(parser.parse_args(argv))
-
-
 def executar(args: argparse.Namespace) -> int:
     """Executa a reversão a partir de argumentos já interpretados."""
     try:
@@ -596,7 +576,3 @@ def executar(args: argparse.Namespace) -> int:
         print("\nReversão interrompida. Execute novamente para conferir o estado; links antigos foram preservados quando possível.", file=sys.stderr)
         return 130
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

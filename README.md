@@ -1,96 +1,88 @@
-# pltube
+# plpython
 
-Ferramentas em Python para organizar playlists a partir de URLs do YouTube, baixar áudio, criar listas M3U e manter uma biblioteca de músicas. O projeto também inclui uma consulta somente de leitura a playlists do Spotify e um utilitário para migrar bibliotecas já baixadas.
+Baixa músicas de playlists do YouTube em MP3, identifica artista, álbum e capa (YouTube + MusicBrainz), organiza tudo em pastas por artista e gera playlists M3U. O que não dá para confirmar vai para uma lista curta de conferência.
 
-O README separa os recursos disponíveis dos itens que ainda faltam implementar.
+## Instalação
 
-## Comando unificado: `plpython.py`
+- Python 3.10 ou superior
+- FFmpeg instalado no sistema
+- `pip install -r requirements.txt` (yt-dlp, mutagen, spotipy)
 
-Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts antigos continuam funcionando como antes.
+O YouTube muda com frequência; mantenha o yt-dlp atualizado com `pip install -U yt-dlp`.
 
-O `plpython.py` é só o menu: sozinho, ele mostra os comandos e as opções principais de cada um, e encaminha `plpython.py COMANDO ...` para o arquivo do comando em `comandos/`. Tudo de um comando (opções, validações, ajuda e exemplos) fica no arquivo dele:
-
-```
-plpython.py              ← menu: lista os comandos e encaminha
-comandos/
-├── playlist.py          ← importa playlists do YouTube (sua conta) para CSV
-├── download.py          ← tudo do download
-├── update.py            ← usa as opções do download e sempre tenta de novo
-├── metadata.py
-├── review.py
-├── spotify.py
-├── revert.py
-├── legacy_centralize.py
-└── _comum.py            ← opções compartilhadas (pastas, bancos)
-```
-
-A lógica pesada continua em `pltube.py`, `aplicar_metadados.py` etc., que os arquivos de `comandos/` chamam. Para criar um comando novo, basta um arquivo em `comandos/` e acrescentar o nome em `comandos/__init__.py`.
-
-| Comando | Faz | Antes era |
-|---|---|---|
-| `playlist` (`importar`) | cria CSVs das suas playlists do YouTube (privadas, curtidas, assistir mais tarde) | novo |
-| `download` (`baixar`) | baixa os CSVs e gera as M3Us | `pltube.py` |
-| `update` (`atualizar`) | relê os CSVs, refaz falhas e pendências sem rebaixar o que já existe | `pltube.py --reprocess` |
-| `metadata` (`metadados`) | aplica a planilha `metadados_pendentes.csv` (simula sem `--apply`) | `aplicar_metadados.py` |
-| `review` (`revisar`) | mostra/confirma as faixas do banco SQL no terminal | novo |
-| `spotify` | lista as faixas de uma playlist Spotify | `spotify_playlist_viewer.py` |
-| `revert` (`reverter`) | desfaz o layout legado `songs/_library` | `reverter_biblioteca.py` |
-| `legacy-centralize` | cria o layout legado (não recomendado) | `sincronizar_biblioteca.py` |
-
-Pastas: rodando `plpython.py` em `~/Musica`, o padrão é `~/Musica/songs`, `~/Musica/playlists` e `~/Musica/sql`, mesmo usando `--csvfile ./outra/pasta`. CSVs passados direto no comando (`download a.csv`) são relativos à pasta atual.
-
-Opções renomeadas (os nomes antigos ainda são aceitos, mas não aparecem na ajuda):
-
-| Novo | Antigo | Motivo |
-|---|---|---|
-| `-c/--csvfile` | `--BaseDir`, `--csvfile` | indica a pasta dos CSVs ou um `.csv` específico, e só isso; `songs/`, `playlists/`, `sql/`, `Logs.txt` e a planilha ficam na pasta de onde você roda o comando |
-| `-s/--songs-dir`, `-p/--playlist-dir`, `-l/--log-file` | `--SongsDir`, `--PlaylistDir`, `--LogFile` | padronizar em minúsculas com hífen |
-| CSVs posicionais: `download a.csv b.csv` | `--lista a.csv` | aceita vários CSVs |
-| `-u/--url-column` | `--row` | nome descreve o que é |
-| `--retry` (já embutido em `update`) | `--reprocess` | mais claro |
-| `--wait-on-limit` | `--esperar-bloqueio` | tinha dois nomes |
-| `--no-hybrid` | `--modelo-hibrido` | a identificação agora é ligada por padrão no `plpython.py`; `--no-hybrid` desliga |
-| `--require-isrc`, `--require-mb-artist` | `--exigir-isrc`, `--exigir-artista-musicbrainz` | nomes curtos |
-| `--no-artist-links` | `--artist-links` | os atalhos para artistas secundários agora são o padrão |
-| `--downloads-db` | `--state-file` | um só nome em todos os comandos |
-| `--legacy-db` | `--legacy-state-file` | movido para opções avançadas |
-| `--sheet` | `--arquivo` | consistência |
-| `revert/legacy-centralize -s/--songs-dir` | `--root` | mesmo nome do download |
-
-Exemplos:
+## Começo rápido
 
 ```bash
-python plpython.py -h                     # lista os comandos
-python plpython.py download -h            # opções de um comando
+python plpython.py                                  # mostra os comandos
+python plpython.py help download                    # todas as opções de um comando
 
-# Baixar todos os CSVs da pasta; músicas e M3Us em pastas próprias
-python plpython.py download -c ./csvs -s /media/Musicas -p ./m3u
+python plpython.py download -c csvs -P              # baixa todos os CSVs da pasta csvs/, com barra de progresso
+python plpython.py review                           # o que ficou para conferir
+python plpython.py review --ok-all                  # estava tudo certo
+python plpython.py update -c csvs                   # depois: tenta de novo falhas e pendências
+```
 
-# Só duas playlists, acrescentando às M3Us
-python plpython.py download csvs/Alone.csv csvs/Rain.csv --append
+O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é executado.
 
-# CSV cuja URL está na última coluna
-python plpython.py download minha.csv -u -1
+## Pastas
 
-# Exigir ISRC confirmado no MusicBrainz
-python plpython.py download -c ./csvs --require-isrc
+Os arquivos são criados **na pasta de onde você roda o comando**, não na pasta do programa:
 
-# Atualizar depois de editar CSVs ou após falhas, esperando se o YouTube bloquear
-python plpython.py update -c ./csvs --wait-on-limit
+```
+pasta onde você rodou/
+├── csvs/                    ← só lida (é o que -c/--csvfile indica)
+├── songs/<artista>/…mp3     ← MP3 no artista principal; atalhos nos secundários (-s muda o nome)
+├── songs/_observar/         ← atalhos das faixas para conferir
+├── playlists/*.m3u          ← uma por CSV (-p muda)
+├── sql/                     ← downloads.sqlite3 (progresso) e musicas.sqlite3 (metadados)
+├── Logs.txt                 ← erros
+└── metadados_pendentes.csv  ← planilha de conferência
+```
 
-# Revisar metadados: simular e depois gravar
-python plpython.py metadata
+## Comandos
+
+| Comando | O que faz |
+|---|---|
+| `playlist` | cria/atualiza CSVs a partir de playlists do YouTube (URL, suas playlists, curtidas, assistir mais tarde) |
+| `download` | baixa os CSVs, identifica as músicas e gera as M3Us; retoma de onde parou |
+| `update` | relê os CSVs, refaz falhas e reavalia `PENDENTE`/`OBSERVAR` sem baixar de novo o que já existe |
+| `review` | mostra e confirma no terminal as faixas guardadas no SQL |
+| `metadata` | aplica as correções feitas na planilha `metadados_pendentes.csv` (simula sem `--apply`) |
+| `spotify` | lista as faixas de uma playlist do Spotify (só consulta) |
+| `revert` | converte uma biblioteca no layout antigo `songs/_library` para pastas por artista (simula sem `--apply`) |
+
+```bash
+# playlist
+python plpython.py playlist "https://www.youtube.com/playlist?list=PL..." --name Rock
+python plpython.py playlist mine --cookies-from-browser firefox
+
+# download / update
+python plpython.py download -c csvs                       # todos os CSVs da pasta
+python plpython.py download -c csvs/Alone.csv             # um CSV
+python plpython.py download a.csv b.csv --append          # vários, acrescentando às M3Us
+python plpython.py download -c csvs -s Musicas -p m3u     # outras pastas de saída
+python plpython.py download -c csvs --prefer-db           # em divergência, vence o MusicBrainz
+python plpython.py download -c csvs --review diff         # só divergências vão para conferência
+python plpython.py download -c csvs --require-isrc        # só aceita com ISRC confirmado
+python plpython.py download -c csvs --no-hybrid           # rápido: só dados do YouTube
+python plpython.py download -c csvs --wait-on-limit --sleep 10-20
+python plpython.py download -c meu.csv -u -1              # URL na última coluna do CSV
+python plpython.py update -c csvs -v
+
+# conferência
+python plpython.py review -d
+python plpython.py review --ok UG1HUOyL9IA
+python plpython.py review --export conferir.csv
 python plpython.py metadata --apply
 
-# Spotify (precisa das variáveis SPOTIFY_*)
+# outros
 python plpython.py spotify "https://open.spotify.com/playlist/ID"
-
-# Desfazer songs/_library
-python plpython.py revert -s songs            # simula
 python plpython.py revert -s songs --apply
 ```
 
-### Identificação de artista, álbum e capa (ligada por padrão)
+O `spotify` precisa de um app no Spotify for Developers e das variáveis `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` e `SPOTIFY_REDIRECT_URI`.
+
+## Como a música é identificada
 
 No `plpython.py download`/`update`, cada vídeo passa por um modelo que não depende de acertar de primeira: ele junta várias pistas, dá uma confiança a cada uma e só pede conferência do que ficou incerto. Para desligar e usar só os dados do YouTube, use `--no-hybrid`.
 
@@ -150,7 +142,41 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 | `--no-review` | não marca nada (as notas ficam guardadas no banco) |
 | `--no-hybrid` | desliga a identificação (mais rápido, só YouTube) |
 
-### Sua conta do Google: playlists privadas, curtidas e vídeos restritos
+## Conferir e corrigir
+
+No terminal, sem precisar de programa de SQL:
+
+```bash
+python plpython.py review                       # faixas OBSERVAR/PENDENTE com o motivo
+python plpython.py review -d                    # + álbum, ISRC, arquivo e link do YouTube
+python plpython.py review --status todas --busca snuffles
+python plpython.py review --ok UG1HUOyL9IA      # está certo: marca como conferida
+python plpython.py review --ok-all              # confirma todas as OBSERVAR
+python plpython.py review --export conferir.csv # abre no Excel/LibreOffice
+python plpython.py review --sql "SELECT title, album FROM music_tracks"   # SQL somente leitura
+```
+
+Rode na mesma pasta onde rodou o download, porque ele lê `./sql/`. Para corrigir título ou artista, use a planilha e o comando `metadata`.
+
+Outros lugares para conferir: `metadados_pendentes.csv` (coluna `observacoes`), a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
+
+```sql
+-- sqlite3 sql/musicas.sqlite3
+SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status = 'OBSERVAR';
+```
+
+Se estiver certo, marque `aplicar=sim` e `confirmar_manual=sim` na planilha e rode `plpython.py metadata --apply`. `update` reconsulta automaticamente as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou.
+
+```bash
+python plpython.py download -c ./csvs               # identifica tudo (padrão)
+python plpython.py download -c ./csvs --prefer-db
+python plpython.py download -c ./csvs --review diff
+python plpython.py download -c ./csvs --no-review
+```
+
+Para corrigir na planilha: para cada campo que quiser mudar, preencha `titulo_final`, `artistas_finais` (separados por `|`), `album_final` ou `isrc_final` e marque o `usar_…` correspondente com `sim`. Marque `aplicar=sim` na linha e `confirmar_manual=sim` para dar a faixa como conferida. Depois rode `plpython.py metadata --apply` (sem `--apply`, só simula). A correção vale para o vídeo em todas as playlists e não é desfeita pelo `update`.
+
+## Sua conta do Google: playlists privadas, curtidas e vídeos restritos
 
 O YouTube não aceita mais login por senha nem OAuth no yt-dlp. O único jeito suportado é usar os **cookies** da sua conta já logada. O programa nunca vê nem pede sua senha.
 
@@ -171,7 +197,7 @@ python plpython.py download -c csvs --cookies-from-browser firefox
 - **Atualizar uma playlist:** rodar `playlist` de novo atualiza o CSV. O `download` só baixa os vídeos novos. Vídeos apagados ou privados ficam fora do CSV (`--include-unavailable` mantém).
 - **Risco:** segundo a wiki do yt-dlp, usar a conta com o yt-dlp pode fazer o YouTube **bloqueá-la temporária ou permanentemente**. Use só quando precisar, mantenha a pausa entre vídeos ou use uma conta secundária. Com conta, o limite sobe de cerca de 300 para cerca de 2000 vídeos por hora.
 
-### Consultas ao YouTube e bloqueios
+## Consultas ao YouTube e bloqueios
 
 - **Uma leitura por música nova:** os metadados lidos para identificar a música são reaproveitados no download, do mesmo jeito que o `yt-dlp --load-info-json`. Se o link guardado expirar, o próprio yt-dlp volta a consultar pela URL. Músicas já baixadas não consultam o YouTube.
 - **Pausa entre vídeos:** 5 a 10 s, sorteados, como recomenda a wiki do yt-dlp. O tempo gasto com MusicBrainz e com o download já conta, então só se espera o que faltar. Ajuste com `--sleep 10-20` ou desligue com `--sleep 0`. Dentro de cada consulta há 0,75 s entre requisições, como no preset `-t sleep` do yt-dlp.
@@ -179,7 +205,7 @@ python plpython.py download -c csvs --cookies-from-browser firefox
 - **Bloqueio da sessão** ("This content isn't available, try again later", HTTP 429, "confirm you're not a bot"): segundo o yt-dlp, dura **até 1 hora**. Sem `--wait-on-limit`, o programa para na hora e avisa para esperar cerca de 1 hora; o progresso fica salvo e basta rodar de novo. Com `--wait-on-limit`, ele espera 5, 15, 30 e 60 min (quase 2 h no total) antes de desistir.
 - **Falha de rede** (502/503/504, timeout): com `--wait-on-limit`, novas tentativas em 30 s, 1, 2, 4, 8 e 10 min.
 
-### Barra de progresso: `-P` / `--progress`
+## Barra de progresso: `-P` / `--progress`
 
 No `download` e no `update`, `-P` deixa uma barra fixa na **última linha** do terminal, como no `pip install`. As mensagens, inclusive as do `-v`, continuam rolando acima dela:
 
@@ -197,7 +223,7 @@ A barra mostra:
 
 Ela é apagada no fim e fica só um resumo. Funciona no Windows; em terminais sem Unicode, a barra usa `#` e `-`. Se a saída for redirecionada para um arquivo, a barra fica desligada.
 
-### Modo detalhado: `-v`, `-vv`, `-vvv` (como no nmap)
+## Modo detalhado: `-v`, `-vv`, `-vvv` (como no nmap)
 
 Funciona no `download`, `update`, `playlist`, `metadata` e `review`. Sem `-v`, a saída é a de sempre.
 
@@ -221,141 +247,24 @@ Exemplo de `-v`:
 [Arquivo] atalho para o artista secundário: CG5/Fallen Down [aaaaaaaaaaa].mp3
 ```
 
-**Conferir no terminal** (não precisa de programa de SQL):
+## Estrutura do código
 
-```bash
-python plpython.py review                       # faixas OBSERVAR/PENDENTE com o motivo
-python plpython.py review -d                    # + álbum, ISRC, arquivo e link do YouTube
-python plpython.py review --status todas --busca snuffles
-python plpython.py review --ok UG1HUOyL9IA      # está certo: marca como conferida
-python plpython.py review --ok-all              # confirma todas as OBSERVAR
-python plpython.py review --export conferir.csv # abre no Excel/LibreOffice
-python plpython.py review --sql "SELECT title, album FROM music_tracks"   # SQL somente leitura
+```
+plpython.py              ← único ponto de entrada: mostra o menu e encaminha cada comando
+comandos/                ← um arquivo por comando: opções, ajuda e exemplos
+├── playlist.py  download.py  update.py  review.py  metadata.py  spotify.py  revert.py
+└── _comum.py            ← opções compartilhadas (pastas, bancos, conta, -v)
+pltube.py                ← motor do download: YouTube, pastas, M3U, SQL, tags e capa
+resolvedor_metadados.py  ← identificação: canal x artista, hipóteses, MusicBrainz, álbum, capa
+aplicar_metadados.py     ← aplica a planilha de correções
+reverter_biblioteca.py   ← conversão do layout antigo songs/_library
+spotify_playlist_viewer.py
+progresso.py  verbose.py ← barra -P e modo -v
 ```
 
-Rode na mesma pasta onde rodou o download, porque ele lê `./sql/`. Para corrigir título ou artista, use a planilha e o comando `metadata`.
+Só o `plpython.py` é executável; os outros arquivos são usados por ele. Para criar um comando novo, basta um arquivo em `comandos/` e acrescentar o nome em `comandos/__init__.py`.
 
-Outros lugares para conferir: `metadados_pendentes.csv` (agora com a coluna `observacoes`), a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
-
-```sql
--- sqlite3 csvs/sql/musicas.sqlite3
-SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status = 'OBSERVAR';
-```
-
-Se estiver certo, marque `aplicar=sim` e `confirmar_manual=sim` na planilha e rode `plpython.py metadata --apply`. `update` reconsulta automaticamente as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou.
-
-```bash
-python plpython.py download -c ./csvs               # identifica tudo (padrão)
-python plpython.py download -c ./csvs --prefer-db
-python plpython.py download -c ./csvs --review diff
-python plpython.py download -c ./csvs --no-review
-```
-
-## O que já funciona
-
-### Downloader do YouTube
-
-`pltube.py` lê um ou vários CSVs com URLs de vídeos do YouTube, usa o `yt-dlp` para obter as informações disponíveis e baixar o áudio em MP3. O FFmpeg é usado para conversão e para incorporar ao arquivo as tags e a thumbnail recebidas no processamento.
-
-`--csvfile` (`-c`; o antigo `--BaseDir` ainda funciona) aponta somente para a pasta dos CSVs ou para um `.csv` específico. `songs/`, `playlists/`, `sql/`, `Logs.txt` e `metadados_pendentes.csv` ficam na pasta de onde você roda o programa. `--SongsDir`/`-s` e `--PlaylistDir`/`-p` escolhem outros nomes ou caminhos; caminhos relativos são resolvidos a partir do diretório atual.
-
-O downloader cria uma playlist M3U para cada CSV. A coluna da URL pode ser indicada com `--row` (índice começando em zero; o padrão é `2`). A opção `--append` acrescenta itens à M3U existente sem duplicar caminhos já listados.
-
-Por padrão, o arquivo MP3 fica dentro da pasta do primeiro artista informado pelos metadados. Com `--artist-links`, essa mesma organização é mantida e o programa cria links para o mesmo arquivo nas pastas dos outros artistas em colaborações. Assim, o áudio existe fisicamente uma vez, na pasta do artista principal; não é criada uma pasta central `_library`. A ordem dos artistas depende dos créditos fornecidos pelo YouTube/yt-dlp.
-
-Essa mudança vale para os novos downloads e para arquivos que o downloader consiga reutilizar no local indicado. Ela não move automaticamente arquivos que já estejam em `_library` na raiz de músicas indicada.
-
-O downloader mantém uma linha de estado para cada download desde que a URL é processada, além do progresso por CSV; retoma itens interrompidos e reutiliza o mesmo vídeo quando ele aparece em outra playlist. `--reprocess` tenta novamente itens que falharam e, no modo híbrido, reconsulta pendências do MusicBrainz sem baixar novamente faixas concluídas nem refazer a consulta ao YouTube. Para bloqueios temporários, `--esperar-bloqueio` ativa tentativas com espera progressiva; se o bloqueio continuar, a execução para antes de consultar outros CSVs.
-
-O estado é separado em dois arquivos no diretório `sql/` (na pasta atual): `downloads.sqlite3` acompanha fila, tentativas, erros, progresso dos CSVs e relações com playlists; `musicas.sqlite3` guarda uma tabela pesquisável por faixa com título, artistas, álbum, ISRC, dados de origem, proveniência, confiança e diagnósticos, além dos resultados completos do modo híbrido. O MP3 não é embutido no banco. Caminhos de áudio e de CSV são relativos para que a estrutura possa ser movida preservando sua relação com a pasta `sql/`. O banco antigo único `pltube_state.sqlite3`, se existir, é migrado uma vez sem ser apagado. Os arquivos podem ser personalizados com `--downloads-db` e `--metadata-db`.
-
-### Modelo híbrido de metadados (opcional)
-
-O modo híbrido só é ativado com `--modelo-hibrido`; sem esse argumento, o comportamento atual não muda. Ele consulta o MusicBrainz e, quando encontra uma correspondência suficientemente clara, prefere título e créditos canônicos da base. A comparação tolera pequenas diferenças de acentos, pontuação, sufixos como “Official Audio” e erros simples de grafia; se houver candidatos próximos ou conflito, não escolhe silenciosamente. Quando reutiliza um MP3 local, também lê o frame ID3 `TSRC` para recuperar um ISRC válido. Esse valor entra na consulta MusicBrainz com proveniência `local`, não é apresentado como se tivesse vindo do YouTube, e só é considerado confirmado se o MusicBrainz ou uma revisão manual o corroborar.
-
-Se a base não confirmar os dados, o programa mantém os valores disponíveis do vídeo como provisórios — sem transformar o canal/uploader em artista — e marca o MP3 com tags ID3 `PLTUBE_METADATA_STATUS=PENDENTE` e uma observação de que os dados podem estar incorretos. O arquivo físico continua na pasta do artista disponível (ou `Artista Desconhecido` se não houver crédito de artista). A pasta `_pendentes`, dentro da raiz de músicas configurada, contém apenas um link para localizar cada faixa pendente, sem duplicar o áudio. Arquivos que já existiam são identificados e registrados sem serem movidos automaticamente.
-
-As faixas que precisam de revisão ficam em `metadados_pendentes.csv`, na pasta base: uma linha por vídeo, com o caminho do áudio, playlists onde aparece, motivos e candidatos do MusicBrainz. A planilha inclui sugestões preenchidas e colunas para você escolher os campos finais. As escolhas são preservadas quando a fila é atualizada; os campos `usar_*` e `aplicar` começam como `nao`, então nada é aprovado automaticamente.
-
-Abra a planilha no Excel ou LibreOffice. Para cada faixa que revisou, marque `aplicar=sim`; marque `usar_titulo`, `usar_artistas`, `usar_album` ou `usar_isrc` como `sim` somente para os campos que quer gravar e ajuste o respectivo campo `_final`. Separe vários artistas com `|`. Use `__LIMPAR__` em `album_final` ou `isrc_final` para apagar explicitamente o campo. Depois de conferir todos os dados, marque `confirmar_manual=sim` para retirar a faixa da fila de pendências; isso exige título e pelo menos um artista.
-
-O aplicador altera as tags ID3 do MP3, registra a origem manual no SQLite e atualiza os nomes mostrados nas M3Us relacionadas. O arquivo de áudio não é movido ou renomeado. Primeiro faça uma simulação; somente `--apply` grava as mudanças. Nenhuma consulta ao YouTube ou MusicBrainz é feita pelo aplicador.
-
-O resolvedor também pode registrar uma URL de capa do Cover Art Archive como sugestão. Nesta primeira integração, baixar essa imagem e substituir a thumbnail já incorporada ao MP3 ainda não foi implementado.
-
-Exemplos:
-
-```bash
-# Processar todos os CSVs da pasta indicada
-python pltube.py --csvfile ./csvs
-
-# Usar pastas de saída específicas; sem estas opções, ficam em ./songs e ./playlists
-python pltube.py --csvfile ./csvs --SongsDir /media/Musicas --PlaylistDir ./m3u
-
-# Processar uma playlist específica, usando a coluna de URLs de índice 2
-python pltube.py --lista csvs/Alone.csv --row 2
-
-# Guardar no artista principal, linkar colaboradores e acrescentar à playlist
-python pltube.py --lista csvs/Alone.csv --artist-links --append
-
-# Repetir falhas anteriores e aguardar se houver bloqueio temporário
-python pltube.py --lista csvs/Alone.csv --reprocess --esperar-bloqueio
-
-# Ativar o modelo híbrido e gerar/atualizar a fila de metadados pendentes
-python pltube.py --csvfile ./csvs --modelo-hibrido
-
-# Exigir ISRC e confirmação do artista pelo MusicBrainz ou revisão manual
-python pltube.py --csvfile ./csvs --modelo-hibrido --exigir-isrc --exigir-artista-musicbrainz
-
-# Simular as edições selecionadas na planilha
-python aplicar_metadados.py
-
-# Aplicar as edições depois de revisar o plano
-python aplicar_metadados.py --apply
-```
-
-### Consulta de playlist do Spotify
-
-`spotify_playlist_viewer.py` autentica o usuário e exibe as faixas e os links de uma playlist Spotify autorizada. É somente uma consulta: não baixa músicas, não altera a playlist e não converte automaticamente os itens para o YouTube.
-
-Para usar, é preciso configurar um app no Spotify for Developers e definir `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` e `SPOTIFY_REDIRECT_URI`. Depois, execute:
-
-```bash
-python spotify_playlist_viewer.py "https://open.spotify.com/playlist/ID_DA_PLAYLIST"
-```
-
-### Ferramenta de migração antiga
-
-`sincronizar_biblioteca.py` foi feita para o layout anterior, que centralizava os MP3s em `songs/_library` e mantinha links nas pastas dos artistas. Ela ainda pode ser usada para esse formato legado, mas **não a execute com `--apply` se quiser manter o layout novo sem pasta central**.
-
-```bash
-# Conferir as mudanças propostas
-python sincronizar_biblioteca.py --root songs
-
-# Aplicar depois de revisar a simulação
-python sincronizar_biblioteca.py --root songs --apply
-```
-
-O migrador reconhece duplicatas idênticas e links existentes, e não baixa novamente as músicas. Ele cria o layout legado com `songs/_library`.
-
-### Reverter para pastas de artistas
-
-`reverter_biblioteca.py` desfaz esse layout legado: move o MP3 físico para a pasta do artista principal, cria links para os colaboradores, atualiza caminhos M3U que apontam diretamente para `_library` e remove a pasta central se ela ficar vazia. Por padrão, o script apenas simula; nada é movido até acrescentar `--apply`.
-
-```bash
-# Conferir o plano sem alterar arquivos
-python reverter_biblioteca.py --root songs
-
-# Aplicar depois de revisar o resultado
-python reverter_biblioteca.py --root songs --apply
-
-# Se suas M3Us estiverem em outra pasta
-python reverter_biblioteca.py --root songs --playlist-dir ./minhas_playlists
-```
-
-O script tenta primeiro recuperar a ordem original do banco SQLite do `pltube` (autodetectado ao lado de `songs`), depois usa as tags do MP3 e, por último, os links existentes. Se só houver vários links e nenhuma dessas fontes informar a ordem, escolhe a primeira pasta em ordem alfabética e avisa na simulação. Conflitos de nomes não sobrescrevem arquivos: um nome alternativo com hash é usado.
-
-## O que falta implementar
+Testes: `python -m unittest discover -s tests -v`.
 
 A lista abaixo contém apenas itens ainda não disponíveis.
 
@@ -363,17 +272,3 @@ A lista abaixo contém apenas itens ainda não disponíveis.
 - [ ] **Catálogo global da biblioteca:** indexar todos os arquivos locais, seus caminhos, fontes, tags e relações com playlists; permitir filtros como `unknown` e `*` para localizar pendências ou revisar o catálogo completo.
 - [ ] **Backup portátil de metadados:** criar e restaurar um catálogo SQLite com URLs, metadados e referências dos arquivos, sem exigir que os MP3s estejam conectados para consultar o catálogo. Esse backup não conterá o áudio.
 - [ ] **Transferência Spotify → YouTube:** pesquisar correspondências de faixas e gerar uma lista para revisão. O visualizador atual não faz essa conversão.
-
-A descrição do modelo híbrido está em [MODELO_HIBRIDO_METADADOS.md](MODELO_HIBRIDO_METADADOS.md). As propostas de catálogo/backup ainda não fazem parte da implementação do repositório.
-
-## Requisitos e testes
-
-- Python 3.10 ou superior.
-- Instalar as dependências Python com `pip install -r requirements.txt`.
-- FFmpeg disponível no sistema para conversão e incorporação de tags/imagens.
-
-Para executar os testes:
-
-```bash
-python -m unittest discover -s tests -v
-```

@@ -1,3 +1,4 @@
+"""Garantias do resolvedor que vieram da primeira versão, agora no modelo atual."""
 import json
 import unittest
 from urllib.parse import parse_qs, urlsplit
@@ -11,10 +12,7 @@ class FakeMusicBrainz:
         self.by_title_artist = by_title_artist or []
         self.by_title = by_title or []
         self.cover_url = cover_url
-        self.isrc_calls = []
-        self.title_artist_calls = []
-        self.title_calls = []
-        self.cover_calls = []
+        self.isrc_calls, self.title_artist_calls, self.title_calls, self.cover_calls = [], [], [], []
 
     def search_by_isrc(self, isrc, limit=10):
         self.isrc_calls.append((isrc, limit))
@@ -28,334 +26,90 @@ class FakeMusicBrainz:
         self.title_calls.append((title, limit))
         return self.by_title
 
-    def get_front_cover(self, release_id):
-        self.cover_calls.append(release_id)
+    def get_album_cover(self, release_group_id="", release_id=""):
+        self.cover_calls.append((release_group_id, release_id))
         return self.cover_url
 
 
 class ResolverTests(unittest.TestCase):
-    def test_uploader_nunca_vira_artista_e_dados_incompletos_ficam_pendentes(self):
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Canção", "uploader": "Canal Oficial", "thumbnail": "https://img/video.jpg"},
-            consultar_musicbrainz=False,
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertEqual(resultado.metadata["artists"], [])
-        self.assertEqual(resultado.metadata["uploader"], "Canal Oficial")
-        self.assertEqual(resultado.metadata["thumbnail_url"], "https://img/video.jpg")
-        self.assertIn("campo obrigatório ausente: artists", resultado.pending_reasons)
-        self.assertIn("campo obrigatório ausente: album", resultado.pending_reasons)
-        self.assertIn(
-            "título informado somente pelo vídeo, sem confirmação independente",
-            resultado.pending_reasons,
-        )
-
-    def test_correcoes_confirmadas_sobrescrevem_fontes_e_pulam_busca_quando_completas(self):
+    def test_correcao_manual_confirmada_vence_tudo_e_nao_consulta_o_banco(self):
         client = FakeMusicBrainz()
-        resultado = resolver.resolver_metadados(
+        resultado = resolver.resolver_com_prioridade(
             "vid001",
-            {
-                "title": "Título do YouTube",
-                "artists": ["Artista do YouTube"],
-                "album": "Álbum do YouTube",
-            },
-            correcoes_locais={
-                "vid001": {
-                    "status_revisao": "CORRIGIDO",
-                    "titulo_corrigido": "Título confirmado",
-                    "artistas_corrigidos": "Artista A|Artista B",
-                    "album_corrigido": "Álbum confirmado",
-                }
-            },
+            {"title": "Título do YouTube", "artists": ["Artista do YouTube"], "album": "Álbum do YouTube"},
+            correcoes_locais={"vid001": {
+                "status_revisao": "CORRIGIDO", "titulo_corrigido": "Título confirmado",
+                "artistas_corrigidos": "Artista A|Artista B", "album_corrigido": "Álbum confirmado",
+            }},
             musicbrainz_client=client,
         )
-
-        self.assertEqual(resultado.status, "RESOLVIDO")
-        self.assertEqual(resultado.metadata["title"], "Título confirmado")
-        self.assertEqual(resultado.metadata["artists"], ["Artista A", "Artista B"])
-        self.assertEqual(resultado.metadata["artist"], "Artista A")
-        self.assertEqual(resultado.metadata["album"], "Álbum confirmado")
+        m = resultado.metadata
+        self.assertEqual((m["title"], m["artists"], m["artist"], m["album"]),
+                         ("Título confirmado", ["Artista A", "Artista B"], "Artista A", "Álbum confirmado"))
         self.assertEqual(resultado.provenance["artists"], "manual")
-        self.assertEqual(client.isrc_calls, [])
-        self.assertEqual(client.title_artist_calls, [])
+        self.assertEqual((client.isrc_calls, client.title_artist_calls), ([], []))
+        self.assertNotIn("PENDENTE", resultado.status)
 
-    def test_correcoes_nao_confirmadas_sao_ignoradas(self):
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Título", "artists": ["Artista"], "album": "Álbum"},
-            correcoes_locais={
-                "vid001": {
-                    "status_revisao": "PENDENTE",
-                    "titulo_corrigido": "Não aplicar ainda",
-                }
-            },
+    def test_correcao_nao_confirmada_e_ignorada(self):
+        resultado = resolver.resolver_com_prioridade(
+            "vid001", {"title": "Título", "artists": ["Artista"], "album": "Álbum"},
+            correcoes_locais={"vid001": {"status_revisao": "PENDENTE", "titulo_corrigido": "Não aplicar"}},
             consultar_musicbrainz=False,
         )
-
         self.assertEqual(resultado.metadata["title"], "Título")
-        self.assertEqual(resultado.provenance["title"], "youtube")
-        self.assertEqual(resultado.status, "PENDENTE")
+        self.assertNotEqual(resultado.provenance["title"], "manual")
 
-    def test_album_vazio_pode_ser_confirmado_sem_inventar_valor(self):
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Canção", "artists": ["Artista"], "album": "Álbum duvidoso"},
-            correcoes_locais={
-                "vid001": {
-                    "status_revisao": "CORRIGIDO",
-                    "campos_confirmados_vazios": ["album"],
-                }
-            },
-            consultar_musicbrainz=False,
-            campos_obrigatorios=("album",),
-        )
-
-        self.assertEqual(resultado.status, "RESOLVIDO")
-        self.assertEqual(resultado.metadata["album"], "")
-        self.assertEqual(resultado.provenance["album"], "manual")
-        self.assertEqual(resultado.confidence["album"], "confirmada_vazia")
-
-    def test_capa_local_manual_satisfaz_campo_cover(self):
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Canção"},
-            correcoes_locais={
-                "vid001": {
-                    "status_revisao": "CORRIGIDO",
-                    "capa_arquivo": "/covers/capa escolhida.jpg",
-                }
-            },
-            musicbrainz_client=FakeMusicBrainz(),
-            campos_obrigatorios=("cover",),
-        )
-
-        self.assertEqual(resultado.status, "RESOLVIDO")
-        self.assertEqual(resultado.metadata["cover_file"], "/covers/capa escolhida.jpg")
-        self.assertEqual(resultado.provenance["cover_file"], "manual")
-
-    def test_isrc_exato_usa_creditos_e_capa_front_de_release_unico(self):
-        mbid = "11111111-1111-4111-8111-111111111111"
-        candidate = {
-            "recording_id": "22222222-2222-4222-8222-222222222222",
-            "title": "Título MusicBrainz",
-            "artists": ["Artista MB"],
-            "isrcs": ["USAAA9900001"],
-            "duration": 180.0,
-            "releases": [{"id": mbid, "title": "Álbum MB", "date": "1999"}],
+    def test_isrc_exato_usa_o_banco_mesmo_com_titulo_do_video_diferente(self):
+        release_id = "11111111-1111-4111-8111-111111111111"
+        candidato = {
+            "recording_id": "22222222-2222-4222-8222-222222222222", "title": "Título MusicBrainz",
+            "artists": ["Artista MB"], "isrcs": ["USAAA9900001"], "duration": 180.0,
+            "releases": [{"id": release_id, "title": "Álbum MB", "date": "1999", "status": "Official",
+                          "primary_type": "Album", "release_group_id": "", "artists": ["Artista MB"]}],
         }
-        client = FakeMusicBrainz(
-            by_isrc=[candidate],
-            cover_url="https://coverartarchive.org/release/example/front-500",
-        )
-        resultado = resolver.resolver_metadados(
+        client = FakeMusicBrainz(by_isrc=[candidato], cover_url="https://coverartarchive.org/x-1200.jpg")
+        resultado = resolver.resolver_com_prioridade(
             "vid001",
-            {
-                "title": "Título do vídeo",
-                "artists": ["Canal não é artista"],
-                "album": "Álbum incerto",
-                "isrc": "us-aaa-99-00001",
-                "uploader": "Canal não é artista",
-            },
+            {"title": "Título do vídeo (Official Video)", "artists": ["Canal não é artista"],
+             "isrc": "us-aaa-99-00001", "uploader": "Canal não é artista", "duration": 180},
             musicbrainz_client=client,
         )
+        m = resultado.metadata
+        self.assertEqual(resultado.status, "RESOLVIDO", resultado.observations)
+        self.assertEqual((m["title"], m["artists"], m["album"]), ("Título MusicBrainz", ["Artista MB"], "Álbum MB"))
+        self.assertEqual(m["isrc"], "USAAA9900001")
+        self.assertEqual(m["cover_url"], "https://coverartarchive.org/x-1200.jpg")
+        self.assertEqual(m["uploader"], "Canal não é artista")
+        self.assertEqual(client.isrc_calls, [("USAAA9900001", 10)])
+        self.assertEqual(client.cover_calls, [("", release_id)])
 
-        self.assertEqual(resultado.status, "RESOLVIDO")
-        self.assertEqual(resultado.metadata["title"], "Título MusicBrainz")
-        self.assertEqual(resultado.metadata["artists"], ["Artista MB"])
-        self.assertEqual(resultado.metadata["album"], "Álbum MB")
-        self.assertEqual(resultado.metadata["cover_url"], "https://coverartarchive.org/release/example/front-500")
-        self.assertEqual(resultado.metadata["uploader"], "Canal não é artista")
-        self.assertEqual(resultado.provenance["cover_url"], "cover_art_archive")
-        self.assertEqual(resultado.source_youtube["artists"], ["Canal não é artista"])
-        self.assertEqual(resultado.source_youtube["album"], "Álbum incerto")
-        self.assertEqual(client.cover_calls, [mbid])
-
-    def test_match_forte_sem_release_nao_confirma_album_do_youtube(self):
-        candidate = {
-            "recording_id": "12121212-1212-4212-8212-121212121212",
-            "title": "Canção Nova",
-            "artists": ["Artista"],
-            "isrcs": [],
-            "duration": 180,
-            "releases": [],
-        }
-        client = FakeMusicBrainz(by_title_artist=[candidate])
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {
-                "title": "Canção Nova",
-                "artists": ["Artista"],
-                "album": "Álbum apenas do vídeo",
-            },
-            musicbrainz_client=client,
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertIn(
-            "nenhum lançamento foi localizado para confirmar o álbum",
-            resultado.pending_reasons,
-        )
-        self.assertEqual(resultado.metadata["album"], "Álbum apenas do vídeo")
-        self.assertEqual(resultado.provenance["title"], "musicbrainz")
-        self.assertEqual(resultado.provenance["artists"], "musicbrainz")
-        self.assertEqual(resultado.confidence["title"], "correspondencia_forte")
-
-    def test_varias_edicoes_para_o_mesmo_isrc_ficam_pendentes(self):
-        recording = {
-            "recording_id": "33333333-3333-4333-8333-333333333333",
-            "title": "Canção",
-            "artists": ["Artista"],
-            "isrcs": ["USAAA9900001"],
-            "duration": 120.0,
-            "releases": [
-                {"id": "44444444-4444-4444-8444-444444444444", "title": "Edição A"},
-                {"id": "55555555-5555-4555-8555-555555555555", "title": "Edição B"},
-            ],
-        }
-        client = FakeMusicBrainz(by_isrc=[recording])
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Canção", "artists": ["Artista"], "isrc": "USAAA9900001"},
-            musicbrainz_client=client,
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertIn("álbum associado a mais de uma edição possível", resultado.pending_reasons)
-        self.assertEqual(client.cover_calls, [])
-        self.assertEqual(len(resultado.candidates[0]["releases"]), 2)
-
-    def test_busca_ambigua_por_titulo_e_artista_nao_escolhe_silenciosamente(self):
-        candidates = [
-            {
-                "recording_id": "66666666-6666-4666-8666-666666666666",
-                "title": "Canção Nova",
-                "artists": ["Artista"],
-                "isrcs": [],
-                "duration": 180,
-                "releases": [],
-            },
-            {
-                "recording_id": "77777777-7777-4777-8777-777777777777",
-                "title": "Canção Nova",
-                "artists": ["Artista"],
-                "isrcs": [],
-                "duration": 181,
-                "releases": [],
-            },
+    def test_empate_no_banco_nao_e_escolhido_as_cegas(self):
+        iguais = [
+            {"recording_id": f"{n}6666666-6666-4666-8666-666666666666", "title": "Canção Nova",
+             "artists": ["Artista"], "isrcs": [], "duration": 180 + n, "releases": []}
+            for n in (6, 7)
         ]
-        client = FakeMusicBrainz(by_title_artist=candidates)
-        resultado = resolver.resolver_metadados(
-            "vid001",
-            {"title": "Canção Nova", "artists": ["Artista"]},
-            musicbrainz_client=client,
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertIn(
-            "várias correspondências plausíveis no MusicBrainz",
-            resultado.pending_reasons,
+        resultado = resolver.resolver_com_prioridade(
+            "vid001", {"title": "Canção Nova", "artists": ["Artista"], "duration": 180},
+            musicbrainz_client=FakeMusicBrainz(by_title_artist=iguais),
         )
         self.assertEqual(resultado.metadata["musicbrainz_recording_id"], "")
         self.assertEqual(len(resultado.candidates), 2)
+        self.assertNotEqual(resultado.status, "RESOLVIDO")
 
-    def test_correspondencia_aceita_pequenas_diferencas_de_titulo_e_artista(self):
-        candidate = {
-            "recording_id": "abababab-abab-4bab-8bab-abababababab",
-            "title": "Don't Stop Believin'",
-            "artists": ["Journey"],
-            "isrcs": [],
-            "duration": 240,
-            "releases": [
-                {"id": "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", "title": "Escape"}
-            ],
-        }
-        client = FakeMusicBrainz(by_title_artist=[candidate])
-        resultado = resolver.resolver_metadados(
-            "vid-fuzzy",
-            {
-                "title": "Dont stop believing (Official Audio)",
-                "artists": ["Journiy"],
-            },
-            musicbrainz_client=client,
-        )
+    def test_capa_frontal_e_nao_a_de_tras(self):
+        payload = {"images": [
+            {"front": False, "types": ["Back"], "image": "https://img/back.jpg"},
+            {"front": True, "types": ["Front"], "image": "https://img/front.jpg",
+             "thumbnails": {"250": "https://img/front-250.jpg", "1200": "https://img/front-1200.jpg"}},
+        ]}
+        client = resolver.MusicBrainzClient(transport=lambda url, headers, timeout: json.dumps(payload).encode())
+        self.assertEqual(client.get_album_cover(release_id="99999999-9999-4999-8999-999999999999"),
+                         "https://img/front-1200.jpg")
 
-        self.assertEqual(resultado.status, "RESOLVIDO")
-        self.assertEqual(resultado.metadata["title"], "Don't Stop Believin'")
-        self.assertEqual(resultado.metadata["artists"], ["Journey"])
-        self.assertEqual(resultado.provenance["title"], "musicbrainz")
-        self.assertGreaterEqual(resultado.candidates[0]["score"], 0.82)
-
-    def test_busca_por_titulo_quando_youtube_nao_fornece_artista(self):
-        candidate = {
-            "recording_id": "dededede-dede-4ded-8ded-dededededede",
-            "title": "Hello",
-            "artists": ["Adele"],
-            "isrcs": [],
-            "duration": 180,
-            "releases": [
-                {"id": "efefefef-efef-4fef-8fef-efefefefefef", "title": "25"}
-            ],
-        }
-        client = FakeMusicBrainz(by_title=[candidate])
-        resultado = resolver.resolver_metadados(
-            "vid-title-only",
-            {"title": "Helo (Official Audio)", "duration": 181},
-            musicbrainz_client=client,
-        )
-
-        self.assertEqual(client.title_calls, [("Helo (Official Audio)", 10)])
-        self.assertEqual(resultado.metadata["artists"], ["Adele"])
-        self.assertEqual(resultado.metadata["title"], "Hello")
-        self.assertEqual(resultado.status, "RESOLVIDO")
-
-    def test_sem_correspondencia_usa_youtube_como_valor_provisorio_e_pendente(self):
-        client = FakeMusicBrainz()
-        original = {
-            "title": "Título do vídeo",
-            "artists": ["Artista do vídeo"],
-            "album": "Álbum do vídeo",
-        }
-        resultado = resolver.resolver_metadados(
-            "vid-pendente", original, musicbrainz_client=client
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertEqual(resultado.metadata["title"], "Título do vídeo")
-        self.assertEqual(resultado.metadata["artists"], ["Artista do vídeo"])
-        self.assertEqual(resultado.metadata["album"], "Álbum do vídeo")
-        self.assertEqual(resultado.provenance["title"], "youtube")
-        self.assertIn(
-            "título informado somente pelo vídeo, sem confirmação independente",
-            resultado.pending_reasons,
-        )
-
-    def test_cache_reutiliza_busca_por_isrc_entre_resolucoes(self):
-        candidate = {
-            "recording_id": "88888888-8888-4888-8888-888888888888",
-            "title": "Canção",
-            "artists": ["Artista"],
-            "isrcs": ["USAAA9900001"],
-            "duration": 120,
-            "releases": [],
-        }
-        client = FakeMusicBrainz(by_isrc=[candidate])
-        cache = {}
-        data = {
-            "title": "Canção",
-            "artists": ["Artista"],
-            "isrc": "USAAA9900001",
-        }
-        resolver.resolver_metadados(
-            "vid001", data, musicbrainz_client=client, cache=cache
-        )
-        resolver.resolver_metadados(
-            "vid001", data, musicbrainz_client=client, cache=cache
-        )
-
-        self.assertEqual(len(client.isrc_calls), 1)
-        self.assertIn("isrc:USAAA9900001", cache)
+    def test_normaliza_isrc_estrito(self):
+        self.assertEqual(resolver.normalize_isrc("us-aaa-99-00001"), "USAAA9900001")
+        self.assertEqual(resolver.normalize_isrc("not-an-isrc"), "")
 
     def test_musicbrainz_client_usa_user_agent_e_respeita_intervalo(self):
         current_time = [10.0]
@@ -385,126 +139,6 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(waits, [1.0])
         self.assertIn("pltube-metadata-resolver/", requests[0][1]["User-Agent"])
         self.assertEqual(parse_qs(urlsplit(requests[0][0]).query)["fmt"], ["json"])
-
-    def test_cliente_capa_escolhe_thumbnail_front_nao_back(self):
-        release_id = "99999999-9999-4999-8999-999999999999"
-        payload = {
-            "images": [
-                {"front": False, "types": ["Back"], "image": "https://img/back.jpg"},
-                {
-                    "front": True,
-                    "types": ["Front"],
-                    "image": "https://img/front.jpg",
-                    "thumbnails": {"250": "https://img/front-250.jpg"},
-                },
-            ]
-        }
-
-        def transport(url, headers, timeout):
-            return json.dumps(payload).encode("utf-8")
-
-        client = resolver.MusicBrainzClient(transport=transport)
-        self.assertEqual(
-            client.get_front_cover(release_id), "https://img/front-250.jpg"
-        )
-
-    def test_normaliza_isrc_estrito(self):
-        self.assertEqual(resolver.normalize_isrc("us-aaa-99-00001"), "USAAA9900001")
-        self.assertEqual(resolver.normalize_isrc("not-an-isrc"), "")
-
-    def test_isrc_local_e_fonte_separada_e_pode_ser_exigido_com_confirmacao(self):
-        client = FakeMusicBrainz()
-        resultado = resolver.resolver_metadados(
-            "vid-local-isrc",
-            {"title": "Canção", "artists": ["Artista"]},
-            musicbrainz_client=client,
-            campos_obrigatorios=("isrc",),
-            exigir_isrc=True,
-            dados_locais={"isrc": "us-aaa-99-00001"},
-        )
-
-        self.assertEqual(client.isrc_calls, [("USAAA9900001", 10)])
-        self.assertEqual(resultado.metadata["isrc"], "USAAA9900001")
-        self.assertEqual(resultado.provenance["isrc"], "local")
-        self.assertEqual(resultado.source_youtube["isrc"], "")
-        self.assertEqual(resultado.source_local["isrc"], "USAAA9900001")
-        self.assertIn(
-            "ISRC recuperado das tags locais do MP3",
-            resultado.diagnostics_by_source["local"],
-        )
-        self.assertIn(
-            "ISRC disponível, mas não confirmado pelo MusicBrainz ou por revisão manual",
-            resultado.pending_reasons,
-        )
-
-    def test_match_musicbrainz_pode_confirmar_isrc_vindo_de_tag_local(self):
-        candidate = {
-            "recording_id": "abababab-abab-4bab-8bab-abababababab",
-            "title": "Canção",
-            "artists": ["Artista"],
-            "isrcs": ["USAAA9900001"],
-            "duration": 180,
-            "releases": [
-                {"id": "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", "title": "Álbum"}
-            ],
-        }
-        client = FakeMusicBrainz(by_isrc=[candidate])
-        resultado = resolver.resolver_metadados(
-            "vid-local-confirmed",
-            {"title": "Canção", "artists": ["Artista"]},
-            musicbrainz_client=client,
-            dados_locais={"isrc": "USAAA9900001"},
-        )
-
-        self.assertEqual(resultado.provenance["isrc"], "musicbrainz")
-        self.assertEqual(resultado.metadata["isrc"], "USAAA9900001")
-
-    def test_isrc_ausente_vira_pendencia_e_diagnostico_por_fonte(self):
-        resultado = resolver.resolver_metadados(
-            "vid-sem-isrc",
-            {"title": "Canção", "artists": ["Artista"]},
-            musicbrainz_client=FakeMusicBrainz(),
-            campos_obrigatorios=("isrc",),
-        )
-
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertIn("campo obrigatório ausente: isrc", resultado.pending_reasons)
-        self.assertIn(
-            "yt-dlp/YouTube não forneceu um ISRC válido",
-            resultado.diagnostics_by_source["youtube"],
-        )
-        self.assertIn(
-            "MusicBrainz não encontrou uma correspondência para ISRC/título/artista",
-            resultado.diagnostics_by_source["musicbrainz"],
-        )
-
-    def test_correspondencia_sem_artista_nao_confirma_artista_do_video(self):
-        candidate = {
-            "recording_id": "abababab-abab-4bab-8bab-abababababab",
-            "title": "Canção",
-            "artists": [],
-            "isrcs": ["USAAA9900001"],
-            "duration": 180,
-            "releases": [],
-        }
-        resultado = resolver.resolver_metadados(
-            "vid-sem-artista-mb",
-            {"title": "Canção", "artists": ["Crédito incerto"], "isrc": "USAAA9900001"},
-            musicbrainz_client=FakeMusicBrainz(by_isrc=[candidate]),
-            exigir_artista_musicbrainz=True,
-        )
-
-        self.assertEqual(resultado.provenance["artists"], "youtube")
-        self.assertEqual(resultado.status, "PENDENTE")
-        self.assertIn(
-            "artista informado somente pelo vídeo, sem confirmação independente",
-            resultado.pending_reasons,
-        )
-        self.assertIn(
-            "artista não confirmado pelo MusicBrainz ou por revisão manual",
-            resultado.pending_reasons,
-        )
-        self.assertTrue(resultado.diagnostics_by_source["musicbrainz"])
 
 
 if __name__ == "__main__":

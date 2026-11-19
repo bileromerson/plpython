@@ -244,7 +244,7 @@ def aplicar_revisoes(
         raise FileNotFoundError(f"CSV de revisão não encontrado: {arquivo_csv}")
     if not os.path.isfile(arquivo_estado):
         raise FileNotFoundError(
-            f"Banco SQLite não encontrado: {arquivo_estado}. Use o mesmo --BaseDir/--state-file do downloader."
+            f"Banco SQLite não encontrado: {arquivo_estado}. Rode na mesma pasta do download (ou use --downloads-db)."
         )
     os.makedirs(pasta_playlists, exist_ok=True)
     pltube.SONGS_DIR = os.path.abspath(pasta_musicas)
@@ -316,37 +316,9 @@ def aplicar_revisoes(
         conexao.close()
 
 
-def criar_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Revisa e aplica metadados selecionados em MP3s; simula por padrão"
-    )
-    parser.add_argument(
-        "-b", "--BaseDir", dest="base_dir",
-        help="(ignorado) a planilha, sql/ e songs/ são lidos da pasta de execução",
-    )
-    parser.add_argument("--arquivo", default="metadados_pendentes.csv", help="CSV editado pelo usuário")
-    parser.add_argument("-s", "--SongsDir", dest="songs_dir")
-    parser.add_argument("-p", "--PlaylistDir", dest="playlist_dir")
-    parser.add_argument(
-        "--downloads-db", "--state-file", dest="downloads_db",
-        default=os.path.join("sql", "downloads.sqlite3"),
-    )
-    parser.add_argument(
-        "--metadata-db", default=os.path.join("sql", "musicas.sqlite3")
-    )
-    parser.add_argument("--apply", action="store_true", help="grava tags/SQLite e atualiza M3Us; padrão é simulação")
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    return executar(criar_parser().parse_args(argv))
-
-
 def executar(args: argparse.Namespace) -> int:
     """Executa o aplicador a partir de argumentos já interpretados (usado por plpython.py)."""
     # A pasta base só serve para ler CSVs no download; aqui tudo vem da pasta atual.
-    if getattr(args, "base_dir", None) and os.path.abspath(args.base_dir) != os.getcwd():
-        print("Aviso: --BaseDir é ignorado aqui; usando a pasta atual para planilha, sql/ e songs/.")
     base = os.getcwd()
     arquivo_csv = _caminho(base, args.arquivo)
     arquivo_estado = _caminho(base, args.downloads_db)
@@ -371,7 +343,3 @@ def executar(args: argparse.Namespace) -> int:
         print(f"Erro: {exc}")
         return 1
     return 1 if resultado["erros"] else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

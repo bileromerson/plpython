@@ -1,4 +1,9 @@
-"""Baixa músicas de CSVs do YouTube e gera playlists M3U."""
+"""Motor do download (usado pelo comando `plpython.py download`/`update`).
+
+Lê os CSVs, consulta o YouTube, identifica a música (resolvedor_metadados),
+baixa o áudio, grava tags e capa, organiza as pastas e gera as M3Us. Não é
+executado diretamente: use `python plpython.py download ...`.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ import verbose
 from verbose import curto, v, vv, vvv
 from resolvedor_metadados import (
     LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
-    ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade, resolver_metadados,
+    ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade,
 )
 
 try:
@@ -166,10 +171,6 @@ def tipo_bloqueio(mensagem: str) -> str:
     if any(sinal in texto for sinal in _SINAIS_REDE):
         return "rede"
     return ""
-
-
-def parece_bloqueio_temporario(mensagem: str) -> bool:
-    return bool(tipo_bloqueio(mensagem))
 
 
 def _minutos(segundos: float) -> str:
@@ -1003,9 +1004,6 @@ def resolver_meta_hibrido(
     sem_dados_youtube: bool = False,
     estado: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    campos_obrigatorios = ["title", "artists", "album"]
-    if EXIGIR_ISRC:
-        campos_obrigatorios.append("isrc")
     progresso.etapa("identificando artista, álbum e capa")
     resultado = resolver_com_prioridade(
         str(meta.get("id") or ""),
@@ -2086,80 +2084,6 @@ def _processar_csv(
     return not bloqueado
 
 
-def atualizar(csv_file: str) -> None:
-    """Compatibilidade com o nome usado pela versão beta anterior."""
-    processar_csv(csv_file, append=True)
-
-
-def criar_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Baixa músicas de CSVs do YouTube e cria playlists M3U")
-    parser.add_argument(
-        "-c", "--csvfile", dest="base_dir", metavar="CAMINHO",
-        help="Pasta com os CSVs ou um .csv específico (padrão: diretório atual); o resto fica na pasta atual",
-    )
-    parser.add_argument("-b", "--BaseDir", dest="base_dir", help=argparse.SUPPRESS)
-    parser.add_argument("-s", "--SongsDir", dest="songs_dir", help="Pasta de músicas (padrão: ./songs)")
-    parser.add_argument(
-        "-p", "--PlaylistDir", dest="playlist_dir",
-        help="Pasta das M3Us (padrão: ./playlists)",
-    )
-    parser.add_argument("-l", "--LogFile", dest="log_file", help="Arquivo de log (padrão: Logs.txt)")
-    parser.add_argument("--lista", help="Caminho de um CSV específico; sem esta opção, processa os CSVs da pasta base")
-    parser.add_argument("--row", type=int, default=2, help="Índice da coluna da URL, começando em 0 (padrão: 2; aceita índices negativos)")
-    parser.add_argument("-a", "--append", action="store_true", help="Acrescenta itens à playlist sem repetir caminhos existentes")
-    parser.add_argument(
-        "--artist-links", "--links-artista", dest="artist_links", action="store_true",
-        help="Guarda o MP3 na pasta do primeiro artista e cria links para os demais artistas, sem duplicar o áudio",
-    )
-    parser.add_argument(
-        "--esperar-bloqueio", "--wait-on-limit", dest="esperar_bloqueio", action="store_true",
-        help="Espera e tenta novamente em bloqueios temporários do YouTube (backoff: 30s até 10min; até 6 tentativas)",
-    )
-    parser.add_argument(
-        "--modelo-hibrido",
-        action="store_true",
-        help="Consulta o MusicBrainz, prioriza correspondências confiáveis e registra metadados provisórios para revisão",
-    )
-    parser.add_argument(
-        "--downloads-db", "--state-file", dest="state_file",
-        default=os.path.join("sql", "downloads.sqlite3"),
-        help="SQLite de downloads/retomada (padrão: ./sql/downloads.sqlite3; --state-file é alias)",
-    )
-    parser.add_argument(
-        "--metadata-db", default=os.path.join("sql", "musicas.sqlite3"),
-        help="SQLite de metadados musicais (padrão: ./sql/musicas.sqlite3)",
-    )
-    parser.add_argument(
-        "--legacy-state-file", default="pltube_state.sqlite3",
-        help="Banco antigo único a migrar, se existir (padrão: ./pltube_state.sqlite3 ou junto dos CSVs)",
-    )
-    parser.add_argument(
-        "--exigir-isrc", action="store_true",
-        help="No modelo híbrido, deixa pendente se não houver ISRC confirmado",
-    )
-    parser.add_argument(
-        "--exigir-artista-musicbrainz", action="store_true",
-        help="No modelo híbrido, exige que o artista seja confirmado pelo MusicBrainz ou manualmente",
-    )
-    parser.add_argument(
-        "--preferir", choices=["youtube", "musicbrainz"], default="youtube",
-        help="No modelo híbrido, qual fonte vence quando YouTube e MusicBrainz divergem (padrão: youtube)",
-    )
-    parser.add_argument(
-        "--revisar", choices=["all", "diff", "none"], default="all",
-        help="Quais faixas marcar como OBSERVAR: all (divergências e só-YouTube), diff (só divergências), none",
-    )
-    parser.add_argument(
-        "--reprocess", action="store_true",
-        help="Relê o CSV, tenta itens que falharam e reconsulta pendências MusicBrainz sem refazer downloads concluídos",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    return executar(criar_parser().parse_args(argv))
-
-
 def executar(args: argparse.Namespace) -> int:
     """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
     global MUSICBRAINZ_CLIENT, RESOLVER_CACHE
@@ -2245,7 +2169,3 @@ def executar(args: argparse.Namespace) -> int:
                 print(f"Não foi possível exportar a fila de metadados pendentes: {exc}")
         estado.close()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

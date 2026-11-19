@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pltube
 import spotify_playlist_viewer
-import sincronizar_biblioteca
 
 
 class FakeYoutubeDL:
@@ -38,49 +37,15 @@ class FakeYoutubeDL:
 class PltubeTests(unittest.TestCase):
     def setUp(self):
         # Sem a pausa real de 5-10 s entre vídeos durante os testes.
-        patcher = patch.object(pltube, "PAUSA_YOUTUBE", (0.0, 0.0))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Estado inicial fixo: estes testes cobrem o modo sem identificação e sem
+        # atalhos, independente do que outro teste deixou configurado.
+        for nome, valor in (("PAUSA_YOUTUBE", (0.0, 0.0)), ("MODELO_HIBRIDO", False),
+                            ("ARTIST_LINKS", False), ("COOKIES_YTDLP", {})):
+            patcher = patch.object(pltube, nome, valor)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def test_migracao_em_simulacao_nao_altera_arquivos(self):
-        with tempfile.TemporaryDirectory() as temp:
-            artist_dir = os.path.join(temp, "Artista Um")
-            os.makedirs(artist_dir)
-            song_path = os.path.join(artist_dir, "faixa.mp3")
-            with open(song_path, "wb") as audio:
-                audio.write(b"audio")
 
-            resultado = sincronizar_biblioteca.sincronizar(temp, aplicar=False)
-
-            self.assertEqual(resultado["encontradas"], 1)
-            self.assertTrue(os.path.isfile(song_path))
-            self.assertFalse(os.path.exists(os.path.join(temp, "_library")))
-
-    def test_migracao_centraliza_duplicatas_e_preserva_caminhos_antigos(self):
-        with tempfile.TemporaryDirectory() as temp:
-            originais = []
-            for artist in ("Artista A", "Artista B"):
-                artist_dir = os.path.join(temp, artist)
-                os.makedirs(artist_dir)
-                song_path = os.path.join(artist_dir, "faixa.mp3")
-                with open(song_path, "wb") as audio:
-                    audio.write(b"same audio")
-                originais.append(song_path)
-
-            resultado = sincronizar_biblioteca.sincronizar(temp, aplicar=True)
-
-            biblioteca = os.path.join(temp, "_library")
-            arquivos = os.listdir(biblioteca)
-            self.assertEqual(len(arquivos), 1)
-            canonical = os.path.join(biblioteca, arquivos[0])
-            self.assertEqual(resultado["movidas"], 1)
-            self.assertEqual(resultado["deduplicadas"], 1)
-            for caminho in originais:
-                self.assertTrue(os.path.lexists(caminho))
-                self.assertEqual(os.path.realpath(caminho), os.path.realpath(canonical))
-
-            novamente = sincronizar_biblioteca.sincronizar(temp, aplicar=True)
-            self.assertEqual(novamente["encontradas"], 0)
 
     def test_extrair_id_de_playlist_spotify_de_url_uri_e_id(self):
         playlist_id = "3cEYpjA9oz9GiPac4AsH4n"
@@ -883,26 +848,25 @@ class PltubeTests(unittest.TestCase):
             finally:
                 estado.close()
 
-    def test_parametro_esperar_bloqueio_aparece_no_parser(self):
-        args = pltube.criar_parser().parse_args(
-            [
-                "--esperar-bloqueio", "--modelo-hibrido", "--reprocess",
-                "--state-file", "cache.sqlite3", "--exigir-isrc",
-                "--exigir-artista-musicbrainz",
-            ]
+    def test_parametros_do_download(self):
+        from comandos import download
+        args = download.criar_parser().parse_args(
+            ["--wait-on-limit", "--retry", "--downloads-db", "cache.sqlite3",
+             "--require-isrc", "--require-mb-artist"]
         )
         self.assertTrue(args.esperar_bloqueio)
         self.assertTrue(args.modelo_hibrido)
         self.assertTrue(args.reprocess)
         self.assertTrue(args.exigir_isrc)
         self.assertTrue(args.exigir_artista_musicbrainz)
-        self.assertEqual(args.state_file, "cache.sqlite3")
+        self.assertEqual(args.downloads_db, "cache.sqlite3")
 
     def test_base_dir_padrao_salva_m3u_na_pasta_playlists(self):
         with tempfile.TemporaryDirectory() as temp:
             antigos = (pltube.BASE_DIR, pltube.SONGS_DIR, pltube.PLAYLISTS_DIR)
             try:
-                args = pltube.criar_parser().parse_args(["--BaseDir", temp])
+                from comandos import download
+                args = download.criar_parser().parse_args(["-c", temp])
                 pltube.verificar_diretorios(args)
                 self.assertEqual(pltube.BASE_DIR, os.path.abspath(temp))
                 # BaseDir só muda os CSVs; o resto fica na pasta atual.
