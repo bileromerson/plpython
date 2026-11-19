@@ -8,6 +8,7 @@ executado diretamente: use `python plpython.py download ...`.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -58,7 +59,7 @@ FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução
 ARTISTAS_DB = ""  # --artists-db; vazio = artistas.sqlite3 ao lado do banco de músicas
 ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
-FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music"}
+FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music", "banco_isrc"}
 # Falhas de rede/servidor (502/503, timeout): somem em segundos ou minutos.
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
@@ -1059,6 +1060,48 @@ def artista_confiavel(resultado: dict[str, Any] | None) -> bool:
     return float((resultado.get("scores") or {}).get("artists") or 0) >= LIMIAR_CONFIANCA
 
 
+CAMPOS_DO_ISRC = ("title", "artists", "artist", "album", "album_artists", "date", "label", "track_number",
+                  "track_total", "disc_number", "disc_total", "musicbrainz_recording_id",
+                  "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_artist_ids",
+                  "cover_url", "cover_source")
+
+
+def faixa_pelo_isrc(estado: sqlite3.Connection | None, isrc: str, video_id: str) -> dict[str, Any] | None:
+    """Faixa já confirmada (RESOLVIDO) com o mesmo ISRC, de outro vídeo."""
+    if estado is None or not isrc:
+        return None
+    try:
+        linhas = estado.execute(
+            "SELECT video_key FROM music.music_tracks WHERE isrc = ? AND metadata_status = 'RESOLVIDO' "
+            "AND video_id != ? ORDER BY updated_at DESC", (isrc, video_id),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for linha in linhas:
+        salvo = carregar_resolucao(estado, linha[0])
+        if salvo and (salvo["result"].get("metadata") or {}).get("artists"):
+            v("SQL", f"ISRC {isrc} já está no banco: {linha[0]}")
+            return salvo["result"]
+    return None
+
+
+def usar_faixa_do_isrc(resultado: dict[str, Any], conhecida: dict[str, Any], isrc: str) -> None:
+    """Mesmo ISRC = mesma gravação: os dados confirmados do banco valem para este vídeo."""
+    metadata = resultado.setdefault("metadata", {})
+    provenance = resultado.setdefault("provenance", {})
+    confidence = resultado.setdefault("confidence", {})
+    origem = conhecida.get("metadata") or {}
+    for campo in CAMPOS_DO_ISRC:
+        if origem.get(campo) not in (None, "", []):
+            metadata[campo] = copy.deepcopy(origem[campo])
+            provenance[campo] = "banco_isrc"
+            confidence[campo] = "confirmada"
+    metadata["isrc"], provenance["isrc"], confidence["isrc"] = isrc, "banco_isrc", "confirmada"
+    resultado["status"] = "RESOLVIDO"
+    resultado["pending_reasons"] = []
+    resultado.setdefault("diagnostics", []).append(f"ISRC {isrc} igual ao de uma faixa já confirmada no banco")
+
+
 def resolver_meta_hibrido(
     meta: dict[str, Any],
     *,
@@ -1067,6 +1110,9 @@ def resolver_meta_hibrido(
     estado: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     progresso.etapa("identificando artista, álbum e capa")
+    # 1º o código da música (ISRC): se outra faixa já confirmada tem o mesmo, é a mesma gravação
+    isrc = normalize_isrc(meta.get("isrc") or (dados_locais or {}).get("isrc"))
+    conhecida = faixa_pelo_isrc(estado, isrc, str(meta.get("id") or "")) if isrc else None
     resultado = resolver_com_prioridade(
         str(meta.get("id") or ""),
         {} if sem_dados_youtube else meta,
@@ -1079,7 +1125,10 @@ def resolver_meta_hibrido(
         exigir_isrc=EXIGIR_ISRC,
         exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
         dados_locais=dados_locais,
+        consultar_musicbrainz=conhecida is None,  # já confirmada pelo ISRC: não precisa consultar
     ).to_dict()
+    if conhecida:
+        usar_faixa_do_isrc(resultado, conhecida, isrc)
     import banco_artistas
 
     for de, para in banco_artistas.corrigir_resultado(estado, resultado):

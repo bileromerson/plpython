@@ -48,3 +48,28 @@ class DownloadAskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsrcNoBancoTests(unittest.TestCase):
+    def test_mesmo_isrc_usa_faixa_confirmada_sem_musicbrainz(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            con = pltube.abrir_banco_estado(os.path.join(tmp, "d.sqlite3"), os.path.join(tmp, "m.sqlite3"))
+            confirmada = {"status": "RESOLVIDO", "video_id": "aaaaaaaaaaa",
+                          "metadata": {"title": "Believer", "artists": ["Imagine Dragons"], "album": "Evolve",
+                                       "isrc": "USUM71700626"}}
+            con.execute("INSERT INTO music.metadata_resolution (video_key, video_id, status, result_json) "
+                        "VALUES ('youtube:aaaaaaaaaaa', 'aaaaaaaaaaa', 'RESOLVIDO', ?)", (json.dumps(confirmada),))
+            pltube._salvar_metadados_musica(con, "youtube:aaaaaaaaaaa", confirmada)
+            con.commit()
+            cliente = mock.Mock()
+            with mock.patch.object(pltube, "MUSICBRAINZ_CLIENT", cliente), \
+                    mock.patch.object(pltube, "ARTISTAS_CONHECIDOS", []):
+                meta, res = pltube.resolver_meta_hibrido(
+                    {"id": "zzzzzzzzzzz", "title": "believer lyrics 1 hour", "uploader": "Lyrics Hub",
+                     "isrc": "USUM71700626", "duration": 204}, estado=con)
+            con.close()
+        self.assertEqual(res["status"], "RESOLVIDO")
+        self.assertEqual((res["metadata"]["title"], res["metadata"]["artists"], res["metadata"]["album"]),
+                         ("Believer", ["Imagine Dragons"], "Evolve"))
+        self.assertEqual(res["provenance"]["artists"], "banco_isrc")
+        cliente.search_by_isrc.assert_not_called()

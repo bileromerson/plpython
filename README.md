@@ -173,6 +173,13 @@ O `download`, o `update` e o `review` regravam as M3Us a partir dos CSVs do YouT
 
 ## Como a música é identificada
 
+Ordem, da pista mais forte para a mais fraca:
+
+1. **Código da música (ISRC)**, quando o YouTube ou a tag do MP3 traz um: se uma faixa já confirmada no seu banco tem o mesmo ISRC, é a mesma gravação e os dados dela valem (sem consultar nada na internet); senão, o ISRC é procurado no MusicBrainz.
+2. **Bancos**: artistas do banco de músicas e do banco de artistas procurados em cada pedaço do título e no canal.
+3. **Pontuação do YouTube**: canal oficial/Topic, descrição do YouTube Music, formato do título, confirmação no MusicBrainz.
+4. **Você**: o que não passou em nada disso fica em conferência; com `download --ask` as perguntas vêm no fim do próprio download, e a resposta é gravada no banco.
+
 No `plpython.py download`/`update`, cada vídeo passa por um modelo que não depende de acertar de primeira: ele junta várias pistas, dá uma confiança a cada uma e só pede conferência do que ficou incerto. Para desligar e usar só os dados do YouTube, use `--no-hybrid`.
 
 **1. Canal do artista ou re-upload?** O canal recebe pontos a favor ou contra:
