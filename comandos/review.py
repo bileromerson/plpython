@@ -9,6 +9,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -310,6 +311,7 @@ _MOTIVO_CAMPOS = (
     ("artista não confirmado", ("artists",)),
     ("ausente: title", ("title",)),
     ("capa", ("cover",)),
+    ("invertid", ("title", "artists")),
 )
 _REVISAO_PARCIAL = "revisão parcial"
 
@@ -352,10 +354,29 @@ def _ler(pergunta: str) -> str:
     return input(pergunta).strip()
 
 
-def _converter(campo: str, texto: str):
+def _converter(campo: str, texto: str, conhecidos: list[str] | tuple = ()):
     if campo == "artists":
-        return [a.strip() for a in texto.split("|") if a.strip()]
+        import resolvedor_metadados as r
+
+        return r.dividir_artistas(texto, conhecidos) or [p.strip() for p in texto.split("|") if p.strip()]
     return texto
+
+
+_SEPARADOR_DIGITADO = re.compile(r"[,&+/]|\s(?:x|×|vs\.?|e|and|feat\.?|ft\.?|part\.?|with)\s", re.I)
+
+
+def _pedir_artistas(resposta: str, conhecidos: list[str]) -> list[str]:
+    """Mostra como os artistas digitados foram entendidos quando há vírgula, "&" etc.
+    e deixa corrigir; com "|" a divisão é a que você escreveu."""
+    nomes = _converter("artists", resposta, conhecidos)
+    while _SEPARADOR_DIGITADO.search(resposta) and not re.search(r"[|;]", resposta):
+        quantos = "1 artista" if len(nomes) == 1 else f"{len(nomes)} artistas"
+        print(_cor(f"    → {quantos}: {' | '.join(nomes)}", "36"))
+        nova = _ler('    Enter = isso · ou digite de novo (| separa, "aspas" mantêm junto): ')
+        if not nova:
+            break
+        resposta, nomes = nova, _converter("artists", nova, conhecidos)
+    return nomes
 
 
 def _limpar_tela() -> None:
@@ -377,11 +398,13 @@ def _legenda(args: argparse.Namespace, ignorar: set[str]) -> list[str]:
 
     enter = ("Enter = aceita (conflito: valor do banco; vazio: Unknown)" if args.default_ok
              else "Enter = não mexe (o campo continua pendente)")
+    aspas = k('"aspas"')
     linhas = [
         f"{enter}   texto = novo valor   {k(':ok')} = este campo está certo",
         f"{k(':db')} = valor do banco   {k(':yt')} = valor do YouTube   {k(':-')} = apagar (álbum/ISRC)"
-        f"   vários artistas: A {k('|')} B",
+        f"   {k(':inv')} = troca título e artista",
         f"{k(':tudo')} = a faixa toda está certa   {k(':s')} = pular a faixa   {k(':q')} = salvar e sair",
+        f"Vários artistas: A {k('|')} B (vírgula e & também valem; {aspas} mantêm um nome junto)",
         "A faixa só sai da lista quando todos os campos com " + _cor("⚠", "1;33")
         + " forem corrigidos ou marcados com :ok.",
     ]
@@ -439,13 +462,15 @@ def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha,
 
 
 def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
-               problemas: list[str]) -> tuple[dict, set[str], str]:
+               problemas: list[str], conhecidos: list[str] = ()) -> tuple[dict, set[str], str]:
     """Pergunta campo a campo. Devolve (novos valores, campos marcados como certos, ação)."""
     import aplicar_metadados
 
     novos: dict = {}
     certos: set[str] = set()
     for campo in campos:
+        if campo in novos:  # já definido pelo :inv
+            continue
         rotulo = NOMES[campo]
         valor_atual = atual.get(campo) or ([] if campo == "artists" else "")
         marca = _cor("⚠", "1;33") if campo in problemas else " "
@@ -464,6 +489,18 @@ def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
             return novos, certos, "seguir"
         if not resposta:
             continue
+        if comando in (":inv", ":troca"):
+            titulo = str(novos.get("title") or atual.get("title") or "").strip()
+            artistas = novos.get("artists") or atual.get("artists") or []
+            if not titulo or not artistas:
+                print(_cor("    (precisa de título e artista para trocar; o campo continua pendente)", "2"))
+                continue
+            novos["title"] = ", ".join(artistas)
+            novos["artists"] = _converter("artists", titulo, conhecidos)
+            certos.discard("title")
+            certos.discard("artists")
+            print(_cor(f"    ↔ título: {novos['title']} · artistas: {_mostrar(novos['artists'])}", "36"))
+            continue
         if comando == ":ok":
             certos.add(campo)
         elif comando in (":db", ":yt"):
@@ -480,8 +517,14 @@ def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
                 print(_cor("    (só álbum e ISRC podem ser apagados; o campo continua pendente)", "2"))
         elif resposta.startswith(":"):
             print(_cor(f"    (comando desconhecido: {resposta}; o campo continua pendente)", "2"))
+        elif campo == "artists":
+            try:
+                novos[campo] = _pedir_artistas(resposta, list(conhecidos))
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return novos, certos, "abortar"
         else:
-            novos[campo] = _converter(campo, resposta)
+            novos[campo] = resposta
     return novos, certos, "seguir"
 
 
@@ -545,6 +588,7 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         return 0
     legenda = _legenda(args, ignorar)
     no_terminal = getattr(sys.stdout, "isatty", lambda: False)()
+    conhecidos = pltube.carregar_artistas_conhecidos(conexao)  # para entender "A & B" digitado
     resolvidas = parciais = sem_resposta = puladas_skip = erros = 0
     anterior, acao = "", ""
     for posicao, linha in enumerate(linhas, 1):
@@ -568,7 +612,8 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         _tela(posicao=posicao, total=len(linhas), legenda=legenda, anterior=anterior if no_terminal else "",
               linha=linha, salvo=salvo, atual=atual, youtube=youtube, banco=banco,
               problemas=problemas, ignorados=ignorados)
-        novos, certos, acao = _perguntar(perguntar, atual, youtube, banco, problemas)
+        da_faixa = list(youtube["artists"]) + list(banco["artists"]) + list(atual.get("artists") or [])
+        novos, certos, acao = _perguntar(perguntar, atual, youtube, banco, problemas, conhecidos + da_faixa)
         if acao == "abortar":
             print("Saindo; esta faixa não foi alterada. As anteriores já estão salvas.")
             break

@@ -27,7 +27,7 @@ import verbose
 from verbose import curto, v, vv, vvv
 from resolvedor_metadados import (
     LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
-    ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade,
+    dividir_artistas, ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade,
 )
 
 try:
@@ -1283,13 +1283,17 @@ def exportar_metadados_pendentes(
 def normalizar_artistas(
     info: dict[str, Any], permitir_uploader: bool = True
 ) -> list[str]:
-    """Obtém os artistas dos metadados do YouTube, preservando nomes de bandas."""
+    """Obtém os artistas dos metadados do YouTube, preservando nomes de bandas.
+
+    Lista (YouTube Music): cada item é um artista; só "feat." separa. Texto solto
+    ("A, B & C"): passa por dividir_artistas, que conhece "Earth, Wind & Fire" e as
+    duplas ("Jorge & Mateus") e os artistas já confirmados na biblioteca."""
     candidatos = info.get("artists")
     if isinstance(candidatos, str):
-        candidatos = [candidatos]
+        candidatos = dividir_artistas(candidatos, ARTISTAS_CONHECIDOS)
     if not candidatos:
         artista = info.get("artist")
-        candidatos = artista if isinstance(artista, list) else ([artista] if artista else [])
+        candidatos = artista if isinstance(artista, list) else dividir_artistas(artista, ARTISTAS_CONHECIDOS)
 
     artistas: list[str] = []
     for candidato in candidatos:

@@ -213,6 +213,30 @@ class ResponderTests(unittest.TestCase):
         _, simples = self.responder([":s", ":s"])
         self.assertNotIn("\033[", simples)
 
+    def test_virgula_mostra_como_entendeu_e_aspas_ou_barra_corrigem(self):
+        # B: título em branco; artistas "Anitta, Kevinho" → confirma; álbum em branco.
+        # A: título em branco; álbum em branco.
+        codigo, saida = self.responder(["", "Anitta, Kevinho", "", "", "", ""])
+        self.assertEqual(codigo, 0, saida)
+        self.assertIn("→ 2 artistas: Anitta | Kevinho", saida)
+        b = self.banco()[0]["bbbbbbbbbbb"]["result"]
+        self.assertEqual(b["metadata"]["artists"], ["Anitta", "Kevinho"])
+        self.assertEqual(b["status"], "OBSERVAR")  # título e álbum continuam pendentes
+
+    def test_digitar_de_novo_com_barra(self):
+        codigo, saida = self.responder(["", "Fulano & Beltrano", "Fulano | Beltrano", "", "", ""])
+        self.assertIn("→ 1 artista: Fulano & Beltrano", saida)
+        self.assertEqual(self.banco()[0]["bbbbbbbbbbb"]["result"]["metadata"]["artists"], ["Fulano", "Beltrano"])
+
+    def test_inv_troca_titulo_e_artista(self):
+        # B: ":inv" no título → título "Canal Qualquer", artista "Song"; álbum ":ok" → sai da lista.
+        codigo, saida = self.responder([":inv", ":ok", ":s"])
+        self.assertIn("↔ título: Canal Qualquer · artistas: Song", saida)
+        self.assertNotIn("⚠ Artistas [", saida.split("faixa 2 de 2")[0])  # não pergunta de novo
+        b = self.banco()[0]["bbbbbbbbbbb"]["result"]
+        self.assertEqual((b["metadata"]["title"], b["metadata"]["artists"], b["status"]),
+                         ("Canal Qualquer", ["Song"], "RESOLVIDO"))
+
     def test_mapa_de_motivos_para_campos(self):
         from comandos.review import campos_com_problema
         self.assertEqual(campos_com_problema({"observations": ["artista diverge: YouTube='x' / MusicBrainz='y'"]}),

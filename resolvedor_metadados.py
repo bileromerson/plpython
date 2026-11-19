@@ -26,7 +26,7 @@ import urllib.request
 
 from verbose import curto, v, vv
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 MUSICBRAINZ_API = "https://musicbrainz.org/ws/2"
 COVER_ART_API = "https://coverartarchive.org"
@@ -208,6 +208,30 @@ class MusicBrainzClient:
         )
         return self._search(query, limit=limit)
 
+    def search_artist(self, name: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Artistas com esse nome: diz se "A & B" é uma dupla ou dois artistas."""
+        name = _text(name)
+        if not name:
+            return []
+        params = urllib.parse.urlencode(
+            {"query": f'artist:"{_escape_lucene(name)}"', "fmt": "json", "limit": max(1, min(limit, 25))}
+        )
+        payload = self._get_json(f"{MUSICBRAINZ_API}/artist/?{params}", rate_limited=True)
+        return [
+            {"name": _text(a.get("name")), "score": int(a.get("score") or 0), "id": _text(a.get("id")),
+             "aliases": [_text(x.get("name")) for x in a.get("aliases") or [] if isinstance(x, Mapping)]}
+            for a in payload.get("artists") or [] if isinstance(a, Mapping)
+        ]
+
+    def search_by_title_release(self, title: str, release: str, limit: int = 10) -> list[dict[str, Any]]:
+        """A música dentro de um lançamento: "Bella Ciao" na trilha de "La Casa de Papel"."""
+        title, release = _text(title), _text(release)
+        if not title or not release:
+            return []
+        return self._search(
+            f"recording:{_lucene_fuzzy_group(title)} AND release:{_lucene_fuzzy_group(release)}", limit=limit
+        )
+
     def search_by_title(self, title: str, limit: int = 10) -> list[dict[str, Any]]:
         """Busca por título quando o YouTube não fornece créditos de artista."""
         title = _text(title)
@@ -275,16 +299,8 @@ def _artists(value: Any) -> list[str]:
             if name:
                 values.append(name)
         return list(dict.fromkeys(values))
-    text = _text(value)
-    if not text:
-        return []
-    # | é o separador de correções manuais; feat./ft. é crédito de participação.
-    pieces = [text]
-    if "|" in text:
-        pieces = text.split("|")
-    else:
-        pieces = _FEATURE_SPLIT.split(text)
-    return list(dict.fromkeys(piece.strip() for piece in pieces if _text(piece)))
+    # Texto solto: "|" é explícito; vírgula, "&", "feat." seguem dividir_artistas.
+    return dividir_artistas(value)
 
 
 def _extract_youtube_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -749,19 +765,179 @@ def _remixers(texto: str) -> list[str]:
     return [m.group(1) for m in _REMIXER.finditer(_text(texto))]
 
 
-def dividir_artistas(texto: str) -> list[str]:
-    """Separa colaborações ("A, B", "A x B", "A & B & C") sem quebrar nomes de
-    banda com um único "&" ("Mumford & Sons"); o MusicBrainz corrige o resto."""
+# Nomes com vírgula, "&", "+", " x " ou "and" que são UM artista só. Completam os
+# artistas já confirmados na sua biblioteca (que valem do mesmo jeito).
+NOMES_COMPOSTOS = (
+    "Earth, Wind & Fire", "Crosby, Stills, Nash & Young", "Crosby, Stills & Nash", "Emerson, Lake & Palmer",
+    "Blood, Sweat & Tears", "Tyler, The Creator", "Peter Bjorn and John", "Simon & Garfunkel", "Hall & Oates",
+    "Daryl Hall & John Oates", "Mumford & Sons", "Florence + The Machine", "Dan + Shay", "Chloe x Halle",
+    "Years & Years", "Brooks & Dunn", "Sam & Dave", "Ike & Tina Turner", "Belle & Sebastian",
+    "Of Monsters and Men", "Above & Beyond", "Macklemore & Ryan Lewis", "Nico & Vinz", "Tegan and Sara",
+    "She & Him", "Sonny & Cher", "Captain & Tennille", "Seals & Crofts", "Loggins & Messina", "Matt & Kim",
+    "Aly & AJ", "Jack & Jack", "Big & Rich", "Iron & Wine", "Angus & Julia Stone", "Chase & Status",
+    "Lil Nas X",
+    "Jorge & Mateus", "Henrique & Juliano", "Zé Neto & Cristiano", "Chitãozinho & Xororó",
+    "Zezé Di Camargo & Luciano", "Bruno & Marrone", "Maiara & Maraisa", "Simone & Simaria",
+    "Matheus & Kauan", "Victor & Leo", "César Menotti & Fabiano", "Fernando & Sorocaba", "Edson & Hudson",
+    "João Neto & Frederico", "Hugo & Guilherme", "Diego & Victor Hugo", "Israel & Rodolffo",
+    "Marcos & Belutti", "Munhoz & Mariano", "Gian & Giovani", "Leandro & Leonardo", "Rionegro & Solimões",
+    "Milionário & José Rico", "Tião Carreiro & Pardinho", "Guilherme & Benuto", "Clayton & Romário",
+    "Jads & Jadson", "Thaeme & Thiago", "Sandy & Junior", "Claudinho & Buchecha", "Kleiton & Kledir",
+    "Sá & Guarabyra", "Rick & Renner", "João Paulo & Daniel", "Chrystian & Ralf", "Matogrosso & Mathias",
+    "Zé Henrique & Gabriel", "Pedro Paulo & Alex", "Henrique & Diego", "Tonico & Tinoco",
+    "Pena Branca & Xavantinho", "Cascatinha & Inhana", "Day & Lara", "Antony & Gabriel",
+    "Bruninho & Davi", "Mayck & Lyan", "Felipe & Rodrigo",
+)
+# Separadores entre artistas. "lista" e "feat" sempre separam; os ambíguos ("&", "+",
+# "and", "e") podem ser parte do nome ("Jorge & Mateus") ou juntar dois artistas.
+_SEP_ARTISTAS = re.compile(
+    r"\s*,\s*"
+    r"|\s+/\s+"                                                    # "A / B"; AC/DC fica junto
+    r"|\s+(?:x|×|vs\.?|versus)\s+(?=[^\s&,+/])"                    # "A x B" ("Lil Nas X & B" não)
+    r"|\s+(?:feat(?:uring)?\.?|ft\.?|part\.?|participa[çc][ãa]o(?:\s+especial)?(?:\s+de)?|with)\s+"
+    r"|\s+(?:&|\+|and|e)\s+",
+    re.I,
+)
+_SEP_AMBIGUO = re.compile(r"\s+(?:&|\+|and|e)\s+", re.I)
+_INDICE_BASE: dict[str, str] = {}
+
+
+def _tipo_separador(texto: str) -> str:
+    texto = texto.strip().casefold()
+    if texto in {"&", "+", "and", "e"}:
+        return "ambiguo"
+    if texto in {",", "/", "x", "×", "vs", "vs.", "versus"}:
+        return "lista"
+    return "feat"
+
+
+def _indice_nomes(conhecidos: Iterable[str]) -> dict[str, str]:
+    """Nome normalizado → grafia oficial, para os nomes compostos e os já conhecidos."""
+    if not _INDICE_BASE:
+        _INDICE_BASE.update({_normalize_text(n): n for n in NOMES_COMPOSTOS})
+    indice = dict(_INDICE_BASE)
+    for nome in conhecidos or ():
+        chave = _normalize_text(nome)
+        if chave and chave not in indice:
+            indice[chave] = _text(nome)
+    return indice
+
+
+def _limpar_nomes(nomes: Iterable[str]) -> list[str]:
+    limpos: dict[str, str] = {}
+    for nome in nomes:
+        nome = _text(nome).strip(" .,;-")
+        if nome and nome.casefold() not in limpos:
+            limpos[nome.casefold()] = nome
+    return list(limpos.values())
+
+
+def dividir_artistas(texto: Any, conhecidos: Iterable[str] = ()) -> list[str]:
+    """Separa "A, B & C", "A x B", "A feat. B", "A | B" sem quebrar nomes que contêm
+    esses caracteres ("Earth, Wind & Fire", "Jorge & Mateus", "AC/DC").
+
+    * "|" e ";" são explícitos: cada parte é um nome inteiro; "aspas" mantêm um nome junto;
+    * vírgula, " x ", " / ", "vs" e "feat." separam;
+    * "&", "+", "and" e "e" separam numa lista ("A, B & C", "A & B & C"), ou quando um dos
+      lados já é um artista conhecido; sozinhos ("Jorge & Mateus") ficam juntos;
+    * "& The ..." fica junto ("Bob Marley & The Wailers"), a não ser que o outro lado seja
+      um artista conhecido ("Ariana Grande & The Weeknd").
+    Conhecidos = artistas já confirmados na biblioteca + NOMES_COMPOSTOS; quando o trecho
+    bate com um deles, vale a grafia oficial.
+    """
     texto = _remover_simbolos(_text(texto))
     if not texto:
         return []
-    partes = re.split(r"\s*,\s*|\s+(?:x|X|×|vs\.?|feat(?:uring)?\.?|ft\.?)\s+", texto)
-    if len(partes) > 1 or texto.count(" & ") >= 2:
-        partes = [p for parte in partes for p in re.split(r"\s+&\s+", parte)]
-    return list(dict.fromkeys(p.strip(" .") for p in partes if _text(p.strip(" ."))))
+    aspas: list[str] = []
+
+    def guardar(m: re.Match) -> str:
+        aspas.append(m.group(1).strip())
+        return f"\x00{len(aspas) - 1}\x00"
+
+    texto = re.sub(r"[\"“”]([^\"“”]+)[\"“”]", guardar, texto)
+
+    def restaurar(trecho: str) -> str:
+        return re.sub(r"\x00(\d+)\x00", lambda m: aspas[int(m.group(1))], trecho)
+
+    if re.search(r"[|;]", texto):
+        return _limpar_nomes(restaurar(p) for parte in re.split(r"\s*[|;]\s*", texto)
+                             for p in _FEATURE_SPLIT.split(parte))
+
+    pecas: list[tuple[int, int]] = []
+    tipos: list[str] = []
+    posicao = 0
+    for achado in _SEP_ARTISTAS.finditer(texto):
+        if achado.start() <= posicao or achado.end() >= len(texto):
+            continue
+        pecas.append((posicao, achado.start()))
+        tipos.append(_tipo_separador(achado.group(0)))
+        posicao = achado.end()
+    pecas.append((posicao, len(texto)))
+
+    indice = _indice_nomes(conhecidos)
+    itens: list[dict[str, Any]] = []  # trechos já agrupados: nomes conhecidos ficam inteiros
+    depois: list[str] = []            # separador depois de cada item
+    i = 0
+    while i < len(pecas):
+        fim, oficial = i, ""
+        for j in range(len(pecas) - 1, i - 1, -1):  # o maior trecho conhecido primeiro
+            oficial = indice.get(_normalize_text(restaurar(texto[pecas[i][0]:pecas[j][1]])), "")
+            if oficial:
+                fim = j
+                break
+        trecho = texto[pecas[i][0]:pecas[fim][1]]
+        itens.append({"ini": pecas[i][0], "fim": pecas[fim][1], "nome": oficial or trecho, "conhecido": bool(oficial)})
+        if fim < len(tipos):
+            depois.append(tipos[fim])
+        i = fim + 1
+
+    def vizinhos(k: int) -> list[str]:
+        """Separadores do mesmo trecho (entre dois "feat.") que o separador k."""
+        a = b = k
+        while a > 0 and depois[a - 1] != "feat":
+            a -= 1
+        while b < len(depois) - 1 and depois[b + 1] != "feat":
+            b += 1
+        return depois[a:b + 1]
+
+    nomes: list[str] = []
+    atual = itens[0]
+    for k, tipo in enumerate(depois):
+        proximo = itens[k + 1]
+        juntar = False
+        if tipo == "ambiguo":
+            lado_the = re.match(r"(?i)the\s", texto[proximo["ini"]:proximo["fim"]]) and not proximo["conhecido"]
+            mesmos = vizinhos(k)
+            em_lista = "lista" in mesmos or mesmos.count("ambiguo") >= 2
+            juntar = bool(lado_the) or not (em_lista or atual["conhecido"] or proximo["conhecido"])
+        if juntar:
+            atual = {"ini": atual["ini"], "fim": proximo["fim"], "conhecido": False,
+                     "nome": texto[atual["ini"]:proximo["fim"]]}
+        else:
+            nomes.append(atual["nome"])
+            atual = proximo
+    nomes.append(atual["nome"])
+    return _limpar_nomes(restaurar(n) for n in nomes)
 
 
-def analisar_titulo(title: str) -> dict[str, Any]:
+_OBRA = re.compile(
+    r"\b(?:o\.?s\.?t\.?|soundtrack|trilha(?:\s+sonora)?|banda\s+sonora|bso|tema\s+d[aeo]s?|abertura|"
+    r"encerramento|opening|ending|netflix|disney|s[ée]rie|novela|filme)\b",
+    re.I,
+)
+
+
+def parece_obra(texto: Any) -> bool:
+    """"La Casa de Papel OST", "Tema da novela X", "Netflix": filme/série/trilha, não artista."""
+    return bool(_OBRA.search(_text(texto)))
+
+
+def _sem_obra(texto: Any) -> str:
+    """Nome da obra para buscar o lançamento: sem "OST", "trilha sonora", parênteses..."""
+    return re.sub(r"\s{2,}", " ", _OBRA.sub(" ", _sem_parenteses(texto))).strip(" -–—|:")
+
+
+def analisar_titulo(title: str, conhecidos: Iterable[str] = ()) -> dict[str, Any]:
     """Decompõe o título do vídeo em partes úteis para identificar a música."""
     texto = _remover_simbolos(_text(title))
     segmentos = [s.strip() for s in _SEPARADOR_SEGMENTO.split(texto) if s.strip()]
@@ -783,12 +959,14 @@ def analisar_titulo(title: str) -> dict[str, Any]:
     feat: list[str] = []
     achou = _TITLE_FEAT.search(principal)
     if achou and achou.start() > 0:
-        feat = dividir_artistas(achou.group(1).replace(" & ", ", ").replace(" e ", ", ").replace(" and ", ", "))
+        # numa lista de participações, "&", "e" e "and" separam; uma dupla conhecida
+        # ("part. Jorge & Mateus") continua inteira porque a comparação ignora a pontuação
+        feat = dividir_artistas(re.sub(r"\s+(?:&|e|and)\s+", ", ", achou.group(1)), conhecidos)
         principal = (principal[: achou.start()] + principal[achou.end():]).strip()
     # "feat." também pode estar no meio: "Artista ft. Outro - Música"
     meio = re.search(r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+(.+?)(?=\s+[-–—]\s+)", principal, re.I)
     if meio:
-        feat += dividir_artistas(meio.group(1).replace(" & ", ", "))
+        feat += dividir_artistas(re.sub(r"\s+&\s+", ", ", meio.group(1)), conhecidos)
         principal = (principal[: meio.start()] + principal[meio.end():]).strip()
 
     principal = principal.strip(" -–—|\"'")
@@ -948,12 +1126,12 @@ def hipoteses_youtube(
     if "video_title" not in yt:
         yt = dados_youtube_completos(yt)
     canal = avaliar_canal(yt, canal_conhecido, artistas_conhecidos)
-    analise = analisar_titulo(yt.get("video_title") or yt.get("title") or "")
-    feat = analise["feat"]
     conhecidos = [a for a in artistas_conhecidos if _text(a)]
+    analise = analisar_titulo(yt.get("video_title") or yt.get("title") or "", conhecidos)
+    feat = analise["feat"]
     hipoteses: dict[tuple, dict[str, Any]] = {}
 
-    def add(titulo: str, artistas: Sequence[str], origem: str, prior: float) -> None:
+    def add(titulo: str, artistas: Sequence[str], origem: str, prior: float, bruto: str = "") -> None:
         titulo = _text(titulo).strip(" -–—\"'")
         artistas = [a for a in dict.fromkeys(_text(a) for a in list(artistas) + feat) if a]
         if not titulo:
@@ -961,7 +1139,9 @@ def hipoteses_youtube(
         chave = (_normalize_text(titulo), tuple(sorted(_normalize_text(a) for a in artistas)))
         atual = hipoteses.get(chave)
         if atual is None or prior > atual["prior"]:
-            hipoteses[chave] = {"title": titulo, "artists": artistas, "origem": origem, "prior": prior}
+            # bruto: o texto de onde os artistas saíram ("Earth, Wind & Fire"), para conferir a divisão
+            hipoteses[chave] = {"title": titulo, "artists": artistas, "origem": origem, "prior": prior,
+                                "bruto": _text(bruto)}
 
     def conhecido(nome: str) -> bool:
         return any(_mesmo_nome(nome, a) for a in conhecidos)
@@ -991,8 +1171,8 @@ def hipoteses_youtube(
     if lados:
         for lado_artista, lado_titulo in (lados, lados[::-1]):
             # parênteses não identificam o artista: "(Sir Meow Remix)" é o remixer
-            artistas = dividir_artistas(_sem_parenteses(lado_artista))
-            if not artistas:
+            artistas = dividir_artistas(_sem_parenteses(lado_artista), conhecidos)
+            if not artistas or parece_obra(lado_artista):
                 continue
             if any(conhecido(a) for a in artistas) or conhecido(_sem_parenteses(lado_artista)):
                 add(lado_titulo, artistas, "artista_conhecido", 0.9)
@@ -1005,16 +1185,23 @@ def hipoteses_youtube(
             if canal["nome"] and any(_mesmo_nome(canal["nome"], r) for r in _remixers(lado_titulo)):
                 add(lado_titulo, artistas, "youtube_titulo_remix_do_canal", 0.85)
         curador = canal["tipo"] == "curador"
-        add(lados[1], dividir_artistas(_sem_parenteses(lados[0])) or dividir_artistas(lados[0]),
-            "youtube_titulo_artista_primeiro", 0.72 if curador else 0.62)
-        add(lados[0], dividir_artistas(_sem_parenteses(lados[1])) or dividir_artistas(lados[1]),
-            "youtube_titulo_artista_depois", 0.4 if curador else 0.45)
+        obra = [parece_obra(lado) for lado in lados]
+        for indice, (lado_artista, lado_titulo, prior) in enumerate(
+                ((lados[0], lados[1], 0.72 if curador else 0.62), (lados[1], lados[0], 0.4 if curador else 0.45))):
+            if obra[indice]:
+                prior = 0.2  # "Música - Trilha de X": a obra não é o artista
+            add(lado_titulo, dividir_artistas(_sem_parenteses(lado_artista), conhecidos)
+                or dividir_artistas(lado_artista, conhecidos),
+                "youtube_titulo_artista_primeiro" if indice == 0 else "youtube_titulo_artista_depois", prior,
+                bruto=_sem_parenteses(lado_artista))
+        if obra[0] != obra[1]:
+            add(lados[1] if obra[0] else lados[0], [], "youtube_titulo_obra", 0.5)
     if analise["por"]:
         titulo, artista = analise["por"]
-        add(titulo, dividir_artistas(artista), "youtube_titulo_by", 0.75)
+        add(titulo, dividir_artistas(artista, conhecidos), "youtube_titulo_by", 0.75, bruto=artista)
     for segmento in analise["segmentos"]:
         if (canal["nome"] and _mesmo_nome(canal["nome"], segmento)) or conhecido(segmento):
-            add(base, dividir_artistas(segmento), "youtube_titulo_segmento", 0.82)
+            add(base, dividir_artistas(segmento, conhecidos), "youtube_titulo_segmento", 0.82, bruto=segmento)
 
     nome = canal["nome"]
     titulo_canal = base if not lados else lados[1]
@@ -1127,6 +1314,121 @@ def escolher_release(
     return melhor, confianca
 
 
+# --- Quando a busca normal não achou a gravação -------------------------------
+# Até 6 consultas a mais, só nesses casos: a música dentro da trilha ("Música - Série"),
+# qual lado de "A - B" é o artista e se "A & B" é uma dupla ou dois artistas.
+FONTES_LADOS = {"youtube_titulo_artista_primeiro", "youtube_titulo_artista_depois", "youtube_titulo_obra"}
+
+
+def _artista_no_musicbrainz(client: Any, cache: MutableMapping[str, Any], nome: str) -> str:
+    """A grafia oficial, se existe no MusicBrainz um artista com exatamente esse nome; senão ""."""
+    nome = _text(nome)
+    if not nome or not hasattr(client, "search_artist"):
+        return ""
+    chave = f"artist:{_normalize_text(nome)}"
+    if chave not in cache:
+        cache[chave] = copy.deepcopy(client.search_artist(nome, limit=5))
+    alvo = _normalize_text(nome)
+    for artista in cache[chave] or []:
+        nomes = [artista.get("name")] + list(artista.get("aliases") or [])
+        if int(artista.get("score") or 0) >= 90 and any(_normalize_text(n) == alvo for n in nomes if n):
+            vv("MusicBrainz", f"'{nome}' existe como artista: {artista.get('name')}")
+            return _text(artista.get("name"))
+    vv("MusicBrainz", f"'{nome}' não existe como artista")
+    return ""
+
+
+def _gravacoes_com_titulo(client: Any, cache: MutableMapping[str, Any], titulo: str) -> int:
+    """Quantos artistas diferentes gravaram uma música com exatamente esse título."""
+    titulo = _text(titulo)
+    if not titulo or not hasattr(client, "search_by_title"):
+        return 0
+    brutos = _cached_search(cache, f"title_only:{_normalize_text(titulo)}",
+                            lambda: client.search_by_title(titulo, limit=25))
+    alvo = _normalize_text(titulo)
+    return len({tuple(sorted(map(_normalize_text, _artists(c.get("artists")))))
+                for c in brutos if _normalize_text(c.get("title")) == alvo})
+
+
+def _musica_da_obra(client: Any, cache: MutableMapping[str, Any], titulo: str, obra: str,
+                    duracao: float, usar_duracao: bool) -> tuple[dict[str, Any], float] | None:
+    """A gravação de `titulo` num lançamento chamado `obra` (trilha de filme, série, jogo)."""
+    obra = _sem_obra(obra)
+    if not titulo or not obra or not hasattr(client, "search_by_title_release"):
+        return None
+    brutos = _cached_search(cache, f"title_release:{_normalize_text(titulo)}|{_normalize_text(obra)}",
+                            lambda: client.search_by_title_release(titulo, obra, limit=10))
+    alvo = _normalize_text(obra)
+    achadas = []
+    for candidato in brutos:
+        if not _mesmo_texto(titulo, _text(candidato.get("title")), 0.9):
+            continue
+        if not any(_mesmo_texto(obra, _text(r.get("title")), 0.85) or alvo in _normalize_text(r.get("title"))
+                   for r in candidato.get("releases") or []):
+            continue
+        achadas.append((_pontuar(candidato, titulo, [], duracao, usar_duracao), candidato))
+    if not achadas:
+        return None
+    nota, candidato = max(achadas, key=lambda item: item[0])
+    return (candidato, nota) if nota >= 0.8 else None
+
+
+def _lado_do_artista(client: Any, cache: MutableMapping[str, Any], lados: Sequence[str],
+                     conhecidos: Sequence[str]) -> tuple[int | None, str, bool]:
+    """Em "A - B": (0 se A é o artista, 1 se B, None se não dá para saber; explicação;
+    True quando há pistas dos dois lados empatadas). Pistas: o lado que existe como
+    artista no MusicBrainz e o lado que é nome de música. Sem pista nenhuma, nada muda:
+    "Artista - Música" é o formato comum."""
+    a, b = (_sem_parenteses(lado) for lado in lados)
+
+    def existe(lado: str) -> bool:
+        """O lado inteiro, o 1º artista dele ou o 1º nome de "A & B" existe como artista?"""
+        primeiro = (dividir_artistas(lado, conhecidos) or [lado])[0]
+        pedacos = [p for p in _SEP_AMBIGUO.split(primeiro) if p.strip()]
+        return any(_artista_no_musicbrainz(client, cache, nome)
+                   for nome in dict.fromkeys([lado, primeiro] + pedacos[:1]))
+
+    artista = [existe(a), existe(b)]
+    musicas = [_gravacoes_com_titulo(client, cache, x) for x in (a, b)]
+    peso = [min(2, n) for n in musicas]  # nome de música comum ("Bella Ciao") conta mais
+    a_artista = artista[0] + peso[1]
+    b_artista = artista[1] + peso[0]
+    explicacao = (f"'{a}': {'é' if artista[0] else 'não é'} artista, {musicas[0]} gravação(ões) com esse nome; "
+                  f"'{b}': {'é' if artista[1] else 'não é'} artista, {musicas[1]} gravação(ões) com esse nome")
+    if a_artista > b_artista:
+        return 0, explicacao, False
+    if b_artista > a_artista:
+        return 1, explicacao, False
+    return None, explicacao, a_artista > 0
+
+
+def _dividir_com_musicbrainz(client: Any, cache: MutableMapping[str, Any], artistas: Sequence[str],
+                             bruto: str = "") -> list[str]:
+    """Confere a divisão dos artistas: "Earth, Wind & Fire" é um nome só? "A & B" é dupla ou dois?"""
+    artistas = list(artistas)
+    if bruto and len(artistas) > 1 and (oficial := _artista_no_musicbrainz(client, cache, bruto)):
+        v("MusicBrainz", f"'{bruto}' é um artista só: {oficial}")
+        return [oficial]
+    resultado: list[str] = []
+    for nome in artistas:
+        if not _SEP_AMBIGUO.search(nome):
+            resultado.append(nome)
+            continue
+        oficial = _artista_no_musicbrainz(client, cache, nome)
+        if oficial:
+            v("MusicBrainz", f"'{nome}' é um artista só (dupla/banda): {oficial}")
+            resultado.append(oficial)
+            continue
+        partes = [p.strip() for p in _SEP_AMBIGUO.split(nome) if p.strip()]
+        oficiais = [_artista_no_musicbrainz(client, cache, p) for p in partes]
+        if len(partes) > 1 and all(oficiais):
+            v("MusicBrainz", f"'{nome}' são {len(partes)} artistas: {', '.join(oficiais)}")
+            resultado.extend(oficiais)
+        else:
+            resultado.append(nome)
+    return _limpar_nomes(resultado)
+
+
 def resolver_com_prioridade(
     video_id: str,
     dados_ytdlp: Mapping[str, Any] | None,
@@ -1169,7 +1471,7 @@ def resolver_com_prioridade(
     yt = dados_youtube_completos(dados_ytdlp)
     local = _extract_local_metadata(dados_locais)
     canal = avaliar_canal(yt, canal_conhecido, artistas_conhecidos)
-    analise = analisar_titulo(yt["video_title"] or yt["title"])
+    analise = analisar_titulo(yt["video_title"] or yt["title"], artistas_conhecidos)
     ytm = yt["youtube_music"]
 
     hipoteses = hipoteses_youtube(yt, canal_conhecido, artistas_conhecidos) if (yt["video_title"] or yt["title"]) else []
@@ -1211,11 +1513,16 @@ def resolver_com_prioridade(
     provenance: dict[str, str] = {}
     confidence: dict[str, str] = {}
     scores: dict[str, float] = {}
-    for campo in ("title", "artists"):
-        if metadata[campo]:
-            provenance[campo] = base["origem"]
-            confidence[campo] = "provisoria"
-            scores[campo] = base["prior"]
+    def usar_hipotese(h: Mapping[str, Any]) -> None:
+        metadata["title"], metadata["artists"] = h["title"], list(h["artists"])
+        metadata["artist"] = (h["artists"] or [""])[0]
+        for campo in ("title", "artists"):
+            if metadata[campo]:
+                provenance[campo] = h["origem"]
+                confidence[campo] = "provisoria"
+                scores[campo] = h["prior"]
+
+    usar_hipotese(base)
     if metadata["album"]:
         provenance["album"] = "youtube_music" if ytm.get("album") else ("youtube" if yt["album"] else "local")
         scores["album"] = 0.95 if ytm.get("album") else 0.7
@@ -1234,6 +1541,8 @@ def resolver_com_prioridade(
     escolhido: Mapping[str, Any] | None = None
     por_isrc = False
     hipotese_escolhida = base
+    dica_album = ""
+    talvez_invertido = False
     client = musicbrainz_client
     if consultar_musicbrainz and client is None:
         client = MusicBrainzClient()
@@ -1303,6 +1612,41 @@ def resolver_com_prioridade(
                 if melhor:
                     _, escolhido, hipotese_escolhida, ranked = melhor
                     candidatos = [_public_candidate(c, sc) for c, sc in ranked[:5]]
+            lados = analise["lados"]
+            if escolhido is None and lados and base["origem"] in FONTES_LADOS and not explicita:
+                # "Bella Ciao - La Casa de Papel": um lado pode ser a obra (série, filme, jogo).
+                a, b = (_sem_parenteses(lado) for lado in lados)
+                for titulo, obra in ((a, b), (b, a)):
+                    achada = _musica_da_obra(client, cache, titulo, obra, metadata["duration"], usar_duracao)
+                    if achada:
+                        escolhido, nota = achada
+                        hipotese_escolhida = {"title": titulo, "artists": [], "origem": "youtube_titulo_obra",
+                                              "prior": 0.8, "bruto": ""}
+                        candidatos = [_public_candidate(escolhido, nota)]
+                        dica_album = _sem_obra(obra)
+                        v("Modelo", f"'{dica_album}' é a obra (série/filme/trilha) e '{titulo}' é a música")
+                        break
+                if escolhido is None:
+                    lado, explicacao, empate = _lado_do_artista(client, cache, lados, artistas_conhecidos)
+                    if lado is None:
+                        talvez_invertido = empate
+                        v("Modelo", f"qual lado do título é o artista? {explicacao}"
+                                    + (" → empate: pode estar invertido" if empate else " → sem pistas"))
+                    else:
+                        origem = ("youtube_titulo_artista_primeiro", "youtube_titulo_artista_depois")[lado]
+                        nova = next((h for h in hipoteses if h["origem"] == origem), None)
+                        if nova is not None and nova is not base:
+                            v("Modelo", f"título e artista estavam invertidos ({explicacao}); "
+                                        f"usando {' & '.join(nova['artists'])} — {nova['title']}")
+                            base = dict(nova, prior=max(nova["prior"], 0.7))
+                            usar_hipotese(base)
+                        else:
+                            vv("Modelo", f"lado do artista confirmado ({explicacao})")
+            if escolhido is None and base["artists"]:
+                divididos = _dividir_com_musicbrainz(client, cache, base["artists"], base.get("bruto", ""))
+                if divididos != list(base["artists"]):
+                    base = dict(base, artists=divididos)
+                    usar_hipotese(base)
         except Exception as exc:  # rede, limite, cliente injetado: o download segue sem MusicBrainz
             diag["musicbrainz"].append(f"MusicBrainz indisponível: {exc}")
             v("Erro", f"MusicBrainz indisponível; seguindo só com o YouTube: {exc}")
@@ -1365,7 +1709,7 @@ def resolver_com_prioridade(
                 provenance["isrc"] = "musicbrainz"
                 confidence["isrc"] = "confirmada"
 
-        release, conf_release = escolher_release(escolhido, metadata["album"], metadata["artists"])
+        release, conf_release = escolher_release(escolhido, metadata["album"] or dica_album, metadata["artists"])
         if release:
             tipo_release = "/".join([release.get("primary_type") or "?"] + list(release.get("secondary_types") or []))
             v("Álbum", f"lançamento escolhido: '{release['title']}' ({tipo_release}, {release.get('status') or '?'}, "
@@ -1414,6 +1758,7 @@ def resolver_com_prioridade(
                 "youtube_titulo_remix_do_canal": "do título do vídeo (remix feito pelo canal)",
                 "youtube_titulo_artista_primeiro": "do título do vídeo (\"Artista - Música\")",
                 "youtube_titulo_artista_depois": "do título do vídeo (\"Música - Artista\")",
+                "youtube_titulo_obra": "do título do vídeo (a outra parte é a série/filme/trilha)",
                 "youtube_canal": "do nome do canal, que pode não ser o artista",
                 "youtube_canal_oficial": "do nome do canal",
                 "youtube_titulo_by": "do título do vídeo",
@@ -1425,6 +1770,8 @@ def resolver_com_prioridade(
                 f"não confirmado no MusicBrainz; título/artista deduzidos {de_onde} "
                 f"(confiança {base['prior']:.0%})"
             )
+        if talvez_invertido:
+            baixa_confianca.append("título do vídeo no formato \"A - B\": artista e música podem estar invertidos")
 
     if not metadata["cover_url"]:
         if ytm or re.search(r"-\s*topic\s*$", yt["uploader"], re.I):

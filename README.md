@@ -189,7 +189,26 @@ O nome de um canal de re-upload nunca vira artista.
 | "Artista - Música" em canal de re-upload | 72% |
 | só o nome do canal (canal desconhecido) | 40% |
 
-Vários artistas ("VGR, CG5", "R3HAB x A Touch Of Class", "Alok & JØRD & DJ MP4") são separados; um único "&" é mantido ("Mumford & Sons") e o MusicBrainz corrige se for colaboração.
+**Vários artistas.** A mesma regra vale no título do vídeo, nos dados do YouTube, na planilha e no que você digita no `review`:
+
+| Escrito assim | Vira |
+|---|---|
+| `A \| B` ou `A; B` | sempre dois artistas, cada parte inteira (`Earth, Wind & Fire \| Anitta`) |
+| `A, B`, `A x B`, `A / B`, `A vs B`, `A feat. B` | dois artistas (`AC/DC`, sem espaços, fica junto) |
+| `A, B & C`, `A & B & C` | três artistas: o "&" está numa lista |
+| `A & B` sozinho | um nome só (`Jorge & Mateus`, `Mumford & Sons`), a não ser que um dos lados já seja um artista conhecido (`Anitta & Kevinho` com Anitta na sua biblioteca → dois) |
+| `A & The B` | um nome só (`Bob Marley & The Wailers`), a não ser que o outro lado seja conhecido (`Ariana Grande & The Weeknd`) |
+| `"A & B"` entre aspas | um nome só, sempre |
+
+"Conhecidos" são os artistas já confirmados na sua biblioteca, mais uma lista embutida de nomes com vírgula ou "&" (Earth, Wind & Fire, Tyler, The Creator, Simon & Garfunkel e as principais duplas sertanejas, como Jorge & Mateus, Henrique & Juliano e Zé Neto & Cristiano); a grafia oficial é usada. Quando o MusicBrainz não acha a gravação e sobra um "A & B" sem certeza, ele é consultado: se existe um artista com o nome inteiro, fica junto; se existem os dois separados, vira dois. Com a gravação achada, os créditos do MusicBrainz decidem.
+
+**Títulos invertidos ("Música - Artista").** O normal é "Artista - Música", mas há títulos como "Bella Ciao - La Casa de Papel", em que a segunda parte nem é o artista, é a série. Quando o MusicBrainz não acha a gravação em nenhuma das duas ordens:
+
+1. procura a música dentro de um lançamento com o nome da outra parte (a trilha da série, do filme ou do jogo); achando, vêm o artista e o álbum certos;
+2. senão, confere qual parte existe como artista no MusicBrainz e qual é nome de música (com várias gravações), e inverte se for o caso;
+3. se as pistas empatarem, a faixa vai para a conferência com o aviso "artista e música podem estar invertidos"; no `review`, `:inv` troca os dois.
+
+Uma parte com "OST", "trilha sonora", "tema de", "abertura", "Netflix", "novela" ou "série" nunca vira artista. Sem pista nenhuma, fica o formato comum, "Artista - Música". Essas consultas extras (até seis) só acontecem nesses casos.
 
 **3. Confirmação no MusicBrainz.** As melhores hipóteses são buscadas (as duas ordens de "A - B" quando há dúvida). Com uma correspondência, entram a grafia oficial, os créditos completos, o ISRC e os IDs MusicBrainz.
 
@@ -237,8 +256,9 @@ Cada faixa aparece numa tela limpa: a legenda fica sempre no topo e os dados da 
 ```
 ━━ Revisão · faixa 2 de 12 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Enter = não mexe (o campo continua pendente)   texto = novo valor   :ok = este campo está certo
-:db = valor do banco   :yt = valor do YouTube   :- = apagar (álbum/ISRC)   vários artistas: A | B
+:db = valor do banco   :yt = valor do YouTube   :- = apagar (álbum/ISRC)   :inv = troca título e artista
 :tudo = a faixa toda está certa   :s = pular a faixa   :q = salvar e sair
+Vários artistas: A | B (vírgula e & também valem; "aspas" mantêm um nome junto)
 A faixa só sai da lista quando todos os campos com ⚠ forem corrigidos ou marcados com :ok.
 ────────────────────────────────────────────────────────────────────────
 ✓ Queen — Bohemian Rhapsody: saiu da lista
@@ -260,14 +280,16 @@ O que está errado:
 | Resposta | Efeito |
 |---|---|
 | Enter | não mexe; o campo continua pendente (com `--default-ok`, aceita) |
-| texto | novo valor (vários artistas: separe com `\|`; o primeiro é o principal) |
+| texto | novo valor; em artistas, o primeiro é o principal |
 | `:ok` | este campo está certo como está (vale também para álbum vazio) |
 | `:db` / `:yt` | usa o valor do banco / do YouTube |
 | `:-` | apaga (álbum ou ISRC) |
+| `:inv` | troca título e artista ("Bella Ciao" no artista e "La Casa de Papel" no título) |
 | `:tudo` | a faixa inteira está certa |
 | `:s` / `:q` | pula o resto desta faixa / salva o que já respondeu e sai |
 
 - **Só sai da lista o que ficou resolvido.** A faixa vira `RESOLVIDO` quando todos os campos com ⚠ foram corrigidos ou marcados com `:ok`. Se faltar algum, o que você respondeu é gravado e ela continua `OBSERVAR`; na próxima revisão, só os campos que faltam são perguntados.
+- **Artistas digitados com vírgula, "&", " x " etc.** seguem a [regra de vários artistas](#como-a-música-é-identificada), e o `review` mostra como entendeu antes de gravar ("→ 2 artistas: Anitta | Kevinho"). Enter confirma; para mudar, digite de novo usando `|` para separar ou "aspas" para manter um nome junto.
 - **Só os campos com problema (⚠) são perguntados.** Cada motivo aponta um campo: "título diverge" → título; "artista diverge" → artistas; "deduzidos do título/canal" → título e artistas; "álbum não encontrado" → álbum; ISRC → ISRC. Os demais aparecem com ✓. Use `--all-fields` para perguntar todos.
 - **`--skip CAMPO`** (`-x`): não pergunta nem altera esse campo (`title`, `artists`, `album` ou `isrc`; vários: `--skip album isrc`). Ele continua pendente, então a faixa não sai da lista por causa dele, e as faixas que só têm problema nele nem aparecem. `--skip album` também ignora a capa.
 - **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`.

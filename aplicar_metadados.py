@@ -32,8 +32,10 @@ def _caminho(base: str, valor: str) -> str:
 def _artistas(valor: str) -> list[str]:
     if valor.strip().casefold() == LIMPAR.casefold():
         raise ValueError("não é permitido limpar todos os artistas")
-    nomes = [parte.strip() for parte in valor.split("|") if parte.strip()]
-    nomes = pltube.normalizar_artistas({"artists": nomes}, permitir_uploader=False)
+    # "|" separa sem dúvida; vírgula e "&" também valem, sem quebrar "Jorge & Mateus".
+    nomes = pltube.dividir_artistas(valor, pltube.ARTISTAS_CONHECIDOS) or [
+        parte.strip() for parte in valor.split("|") if parte.strip()  # "Unknown" digitado de propósito
+    ]
     if not nomes:
         raise ValueError("informe pelo menos um artista; separe colaboradores com |")
     return nomes
