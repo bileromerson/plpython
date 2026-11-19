@@ -8,6 +8,23 @@ O README separa os recursos disponíveis dos itens que ainda faltam implementar.
 
 Todas as ferramentas agora têm uma entrada única com subcomandos. Os scripts antigos continuam funcionando como antes.
 
+O `plpython.py` é só o menu: sozinho, ele mostra os comandos e as opções principais de cada um, e encaminha `plpython.py COMANDO ...` para o arquivo do comando em `comandos/`. Tudo de um comando (opções, validações, ajuda e exemplos) fica no arquivo dele:
+
+```
+plpython.py              ← menu: lista os comandos e encaminha
+comandos/
+├── download.py          ← tudo do download
+├── update.py            ← usa as opções do download e sempre tenta de novo
+├── metadata.py
+├── review.py
+├── spotify.py
+├── revert.py
+├── legacy_centralize.py
+└── _comum.py            ← opções compartilhadas (pastas, bancos)
+```
+
+A lógica pesada continua em `pltube.py`, `aplicar_metadados.py` etc., que os arquivos de `comandos/` chamam. Para criar um comando novo, basta um arquivo em `comandos/` e acrescentar o nome em `comandos/__init__.py`.
+
 | Comando | Faz | Antes era |
 |---|---|---|
 | `download` (`baixar`) | baixa os CSVs e gera as M3Us | `pltube.py` |

@@ -1,6 +1,6 @@
-"""Consulta e confirma faixas dos bancos SQLite direto no terminal.
+"""Comando `review`: consulta e confirma as faixas do banco SQL no terminal.
 
-Usado por `plpython.py review`. Não precisa de nenhum programa de SQL instalado.
+Não precisa de nenhum programa de SQL instalado. Lê ./sql/ da pasta atual.
 """
 
 from __future__ import annotations
@@ -13,6 +13,20 @@ import sqlite3
 import sys
 
 import pltube
+from comandos._comum import novo_parser, opcoes_bancos, traduzir_ajuda
+
+NOME = "review"
+APELIDOS = ("revisar",)
+RESUMO = "mostra e confirma as faixas do banco SQL direto no terminal"
+OPCOES = "--status  --busca  -d  --ok ID...  --ok-all  --export  --sql"
+EXEMPLOS = """\
+  plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)
+  plpython.py review -d                   # com álbum, arquivo e link do YouTube
+  plpython.py review --status todas --busca snuffles
+  plpython.py review --ok UG1HUOyL9IA njowoGhmw6E
+  plpython.py review --ok-all             # confirma todas as OBSERVAR
+  plpython.py review --export conferir.csv
+  plpython.py review --sql "SELECT title, album FROM music_tracks\""""
 
 STATUS_FILTRO = {
     "revisar": ("PENDENTE", "OBSERVAR"),
@@ -21,6 +35,25 @@ STATUS_FILTRO = {
     "resolvido": ("RESOLVIDO",),
     "todas": (),
 }
+
+
+def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
+    p = novo_parser(prog, "Mostra as faixas guardadas em ./sql/ e permite confirmá-las.", EXEMPLOS)
+    p.add_argument("--status", choices=list(STATUS_FILTRO), default="revisar",
+                   help="quais faixas mostrar (padrão: revisar = OBSERVAR + PENDENTE)")
+    p.add_argument("--busca", metavar="TEXTO", help="filtra por título, artista, álbum ou ID do vídeo")
+    p.add_argument("-d", "--detalhes", action="store_true", help="mostra álbum, ISRC, arquivo e link")
+    p.add_argument("--ok", nargs="+", metavar="VIDEO_ID",
+                   help="marca as faixas como conferidas (RESOLVIDO), mantendo título/artista atuais")
+    p.add_argument("--ok-all", action="store_true", help="confirma todas as faixas OBSERVAR de uma vez")
+    p.add_argument("--export", metavar="CSV", help="salva a lista filtrada num CSV para abrir no Excel")
+    p.add_argument("--sql", metavar="SELECT", help="executa uma consulta SQL somente leitura")
+    opcoes_bancos(p)
+    return traduzir_ajuda(p)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return executar(criar_parser().parse_args(argv))
 
 
 def _abrir(args: argparse.Namespace) -> sqlite3.Connection:
