@@ -36,6 +36,12 @@ class FakeYoutubeDL:
 
 
 class PltubeTests(unittest.TestCase):
+    def setUp(self):
+        # Sem a pausa real de 5-10 s entre vídeos durante os testes.
+        patcher = patch.object(pltube, "PAUSA_YOUTUBE", (0.0, 0.0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_migracao_em_simulacao_nao_altera_arquivos(self):
         with tempfile.TemporaryDirectory() as temp:
             artist_dir = os.path.join(temp, "Artista Um")
@@ -663,7 +669,91 @@ class PltubeTests(unittest.TestCase):
             )
 
         self.assertEqual(resultado, "ok")
-        self.assertEqual([chamada.args[0] for chamada in dormir.call_args_list], [30, 60])
+        # 429 é limite da sessão: esperas longas (5 e 15 min)
+        self.assertEqual([chamada.args[0] for chamada in dormir.call_args_list], [300, 900])
+
+    def test_falha_de_rede_espera_pouco(self):
+        tentativas = []
+
+        def operacao():
+            tentativas.append(1)
+            if len(tentativas) < 3:
+                raise RuntimeError("HTTP Error 503: Service Unavailable")
+            return "ok"
+
+        with (
+            patch.object(pltube, "ESPERAR_BLOQUEIO", True),
+            patch.object(pltube, "registrar_erro"),
+            patch("pltube.time.sleep") as dormir,
+        ):
+            self.assertEqual(pltube.executar_com_retentativas("u", "", operacao), "ok")
+        self.assertEqual([c.args[0] for c in dormir.call_args_list], [30, 60])
+
+    def test_reconhece_as_mensagens_reais_de_bloqueio(self):
+        real = ("ERROR: [youtube] abc: Video unavailable. This content isn’t available, try again later. "
+                "The current session has been rate-limited by YouTube for up to an hour. It is recommended "
+                "to use `-t sleep` to add a delay between video requests")
+        self.assertEqual(pltube.tipo_bloqueio(real), "sessao")
+        self.assertEqual(pltube.tipo_bloqueio("Sign in to confirm you’re not a bot"), "sessao")
+        self.assertEqual(pltube.tipo_bloqueio("HTTP Error 504: Gateway Timeout"), "rede")
+        self.assertEqual(pltube.tipo_bloqueio("Video unavailable. This video is private"), "")
+
+    def test_limite_da_sessao_desiste_depois_de_mais_de_uma_hora(self):
+        with (
+            patch.object(pltube, "ESPERAR_BLOQUEIO", True),
+            patch.object(pltube, "registrar_erro"),
+            patch("pltube.time.sleep") as dormir,
+        ):
+            with self.assertRaises(pltube.BloqueioTemporarioYouTube):
+                pltube.executar_com_retentativas(
+                    "u", "", lambda: (_ for _ in ()).throw(RuntimeError("try again later")))
+        esperas = [c.args[0] for c in dormir.call_args_list]
+        self.assertEqual(esperas, [300, 900, 1800, 3600])
+        self.assertGreater(sum(esperas), 3600)
+
+    def test_pausa_entre_videos_desconta_o_tempo_ja_passado(self):
+        with (
+            patch.object(pltube, "PAUSA_YOUTUBE", (5.0, 10.0)),
+            patch.object(pltube, "_ULTIMA_CONSULTA_YOUTUBE", 100.0),
+            patch("pltube.random.uniform", return_value=8.0),
+            patch("pltube.time.monotonic", side_effect=[103.0, 111.0]),
+            patch("pltube.time.sleep") as dormir,
+        ):
+            pltube.aguardar_vez_youtube()
+        dormir.assert_called_once_with(5.0)  # 8 s sorteados - 3 s já passados
+        with (
+            patch.object(pltube, "_ULTIMA_CONSULTA_YOUTUBE", 100.0),
+            patch("pltube.time.monotonic", side_effect=[130.0, 130.0]),
+            patch("pltube.time.sleep") as dormir,
+        ):
+            pltube.aguardar_vez_youtube()
+        dormir.assert_not_called()  # já passou mais que a pausa
+
+    def test_download_reaproveita_os_metadados_lidos(self):
+        class FakeYDL:
+            def __init__(self):
+                self.chamadas = []
+
+            def download_with_info_file(self, caminho):
+                with open(caminho, encoding="utf-8") as arquivo:
+                    self.chamadas.append(("info", json.load(arquivo)["id"]))
+
+            def download(self, urls):
+                self.chamadas.append(("url", urls[0]))
+
+        modulo = type("M", (), {"YoutubeDL": type("Y", (), {
+            "sanitize_info": staticmethod(lambda info, remove_private_keys=False: info)})})
+        with (
+            patch.object(pltube, "yt_dlp", modulo),
+            patch.object(pltube, "INFO_YOUTUBE", {}),
+            patch.object(pltube, "aguardar_vez_youtube") as pausa,
+        ):
+            pltube.guardar_info_youtube("https://y/1", {"id": "v1", "title": "t"})
+            ydl = FakeYDL()
+            pltube.baixar_reaproveitando(ydl, "https://y/1")   # usa o que já foi lido
+            pltube.baixar_reaproveitando(ydl, "https://y/1")   # não tem mais: consulta pela URL
+        self.assertEqual(ydl.chamadas, [("info", "v1"), ("url", "https://y/1")])
+        pausa.assert_called_once()  # só a consulta nova espera a vez
 
     def test_bloqueio_sem_parametro_nao_espera_e_interrompe(self):
         def bloqueada():

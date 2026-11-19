@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -46,15 +47,28 @@ RESOLVER_CACHE: dict[str, Any] = {}
 ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
 FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music"}
+# Falhas de rede/servidor (502/503, timeout): somem em segundos ou minutos.
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
 ESPERA_MAXIMA_SEGUNDOS = 600
+# Limite da sessão ("try again later", 429, "not a bot"): segundo o próprio
+# yt-dlp, o YouTube limita a sessão "por até uma hora". Insistir antes disso só
+# prolonga o bloqueio, então as esperas são longas e passam de 1 hora no total.
+ESPERAS_LIMITE_SESSAO = (5 * 60, 15 * 60, 30 * 60, 60 * 60)
+# Pausa entre vídeos, como recomenda a wiki do yt-dlp (5-10 s). O tempo gasto com
+# MusicBrainz/download conta, então só espera o que faltar.
+PAUSA_YOUTUBE = (5.0, 10.0)
+PAUSA_ENTRE_REQUISICOES = 0.75  # dentro de uma mesma consulta (preset "-t sleep" do yt-dlp)
+_ULTIMA_CONSULTA_YOUTUBE: float | None = None
+# Metadados já lidos nesta execução: o download reaproveita em vez de consultar de novo.
+INFO_YOUTUBE: dict[str, dict[str, Any]] = {}
+MAX_INFO_YOUTUBE = 50
 
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
-    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC
+    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC, PAUSA_YOUTUBE
     global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
     caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
@@ -82,6 +96,9 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     EXIGIR_ISRC = args.exigir_isrc
     EXIGIR_ARTISTA_MUSICBRAINZ = args.exigir_artista_musicbrainz
     PREFERIR = getattr(args, "preferir", None) or "youtube"
+    pausa = getattr(args, "pausa", None)
+    if pausa is not None:
+        PAUSA_YOUTUBE = tuple(pausa)
     REVISAR = getattr(args, "revisar", None) or "all"
 
 
@@ -121,55 +138,90 @@ class BloqueioTemporarioYouTube(RuntimeError):
     """Sinaliza que o YouTube está recusando temporariamente novas requisições."""
 
 
-def parece_bloqueio_temporario(mensagem: str) -> bool:
+_SINAIS_LIMITE_SESSAO = (
+    "try again later", "rate-limited", "rate limited", "rate limit", "ratelimit",
+    "http error 429", "429: too many requests", "too many requests",
+    "not a bot", "captcha", "temporarily blocked", "unusual traffic", "automated queries",
+)
+_SINAIS_REDE = (
+    "http error 502", "http error 503", "http error 504", "service unavailable",
+    "bad gateway", "connection reset", "timed out", "timeout",
+)
+
+
+def tipo_bloqueio(mensagem: str) -> str:
+    """"sessao" (o YouTube limitou a sessão), "rede" (falha passageira) ou ""."""
     texto = mensagem.casefold().replace("’", "'")
-    sinais = (
-        "http error 429", "429: too many requests", "too many requests",
-        "rate limit", "ratelimit", "sign in to confirm you're not a bot",
-        "confirm you're not a bot", "temporarily blocked", "unusual traffic",
-        "automated queries", "http error 502", "http error 503",
-        "http error 504", "service unavailable", "bad gateway",
-        "connection reset", "timed out", "timeout",
-    )
-    return any(sinal in texto for sinal in sinais)
+    if any(sinal in texto for sinal in _SINAIS_LIMITE_SESSAO):
+        return "sessao"
+    if any(sinal in texto for sinal in _SINAIS_REDE):
+        return "rede"
+    return ""
+
+
+def parece_bloqueio_temporario(mensagem: str) -> bool:
+    return bool(tipo_bloqueio(mensagem))
+
+
+def _minutos(segundos: float) -> str:
+    return f"{segundos / 60:.0f} min" if segundos >= 60 else f"{segundos:.0f} s"
+
+
+def aguardar_vez_youtube() -> None:
+    """Espaça as consultas ao YouTube (5-10 s por padrão), descontando o tempo
+    que já passou desde a última, para não chegar ao limite da sessão."""
+    global _ULTIMA_CONSULTA_YOUTUBE
+    minimo, maximo = PAUSA_YOUTUBE
+    if _ULTIMA_CONSULTA_YOUTUBE is not None and maximo > 0:
+        alvo = random.uniform(minimo, maximo)
+        falta = alvo - (time.monotonic() - _ULTIMA_CONSULTA_YOUTUBE)
+        if falta > 0:
+            time.sleep(falta)
+    _ULTIMA_CONSULTA_YOUTUBE = time.monotonic()
 
 
 def executar_com_retentativas(url: str, csv_file: str, operacao):
-    """Repete apenas falhas transitórias, com espera exponencial se habilitada."""
-    espera = ESPERA_INICIAL_SEGUNDOS
+    """Repete só falhas passageiras. Limite da sessão: espera longa (até ~1 h50
+    no total) com --wait-on-limit; sem ela, para e avisa quanto esperar."""
     tentativas = 0
     while True:
         try:
             return operacao()
         except Exception as exc:
             mensagem = str(exc)
-            if not parece_bloqueio_temporario(mensagem):
-                registrar_erro(url, mensagem, csv_file)
+            tipo = tipo_bloqueio(mensagem)
+            registrar_erro(url, mensagem, csv_file)
+            if not tipo:
                 return None
 
-            registrar_erro(url, mensagem, csv_file)
+            if tipo == "sessao":
+                esperas = ESPERAS_LIMITE_SESSAO
+                aviso = ("O YouTube limitou esta sessão (segundo o yt-dlp, por até 1 hora). "
+                         "Continuar insistindo só prolonga o bloqueio.")
+            else:
+                esperas = [min(ESPERA_INICIAL_SEGUNDOS * 2 ** n, ESPERA_MAXIMA_SEGUNDOS)
+                           for n in range(MAX_TENTATIVAS_BLOQUEIO)]
+                aviso = "Falha passageira de rede/servidor do YouTube."
+
             if not ESPERAR_BLOQUEIO:
-                print(
-                    "O YouTube recusou temporariamente o acesso. "
-                    "Para aguardar e tentar novamente, use --esperar-bloqueio."
-                )
+                print(aviso)
+                if tipo == "sessao":
+                    print("Espere cerca de 1 hora e rode o mesmo comando (ou `plpython.py update`); "
+                          "o progresso foi salvo. Para esperar sozinho, use --wait-on-limit.")
+                else:
+                    print("Rode de novo em alguns minutos, ou use --wait-on-limit para tentar sozinho.")
                 raise BloqueioTemporarioYouTube(mensagem) from exc
 
-            if tentativas >= MAX_TENTATIVAS_BLOQUEIO:
-                print(
-                    "O acesso continua bloqueado após as tentativas configuradas. "
-                    "O processamento desta playlist será interrompido."
-                )
+            if tentativas >= len(esperas):
+                print("O acesso continua bloqueado após as tentativas. "
+                      "O processamento será interrompido; rode de novo mais tarde.")
                 raise BloqueioTemporarioYouTube(mensagem) from exc
 
+            espera = esperas[tentativas]
             tentativas += 1
-            print(
-                f"Limite/bloqueio temporário do YouTube. "
-                f"Nova tentativa {tentativas}/{MAX_TENTATIVAS_BLOQUEIO} "
-                f"em {espera} segundos. Pressione Ctrl+C para cancelar."
-            )
+            print(f"{aviso} Nova tentativa {tentativas}/{len(esperas)} em {_minutos(espera)}. "
+                  "Pressione Ctrl+C para cancelar (o progresso está salvo).")
             time.sleep(espera)
-            espera = min(espera * 2, ESPERA_MAXIMA_SEGUNDOS)
 
 
 def criar_diretorios() -> None:
@@ -1195,15 +1247,18 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
             "logger": logger,
             "ignoreerrors": False,
             "noplaylist": True,
+            "sleep_interval_requests": PAUSA_ENTRE_REQUISICOES,
         }
         if ESPERAR_BLOQUEIO:
             # Deixa o backoff do programa controlar as novas tentativas em vez
             # de repetir imediatamente dentro do yt-dlp.
             ydl_opts.update({"retries": 0, "extractor_retries": 0, "fragment_retries": 0})
+        aguardar_vez_youtube()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         if not info:
             raise RuntimeError("yt-dlp não retornou metadados. " + " ".join(logger.errors))
+        guardar_info_youtube(url, info)
         return info
 
     def montar_metadados() -> dict[str, Any]:
@@ -1240,6 +1295,41 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
         return executar_com_retentativas(url, csv_file, montar_metadados)
     except BloqueioTemporarioYouTube:
         raise
+
+
+def guardar_info_youtube(url: str, info: dict[str, Any]) -> None:
+    """Guarda (só na memória) o que o yt-dlp leu, para o download não consultar de novo."""
+    if yt_dlp is None:
+        return
+    try:
+        INFO_YOUTUBE[url] = yt_dlp.YoutubeDL.sanitize_info(dict(info), remove_private_keys=True)
+    except Exception:
+        return
+    while len(INFO_YOUTUBE) > MAX_INFO_YOUTUBE:
+        INFO_YOUTUBE.pop(next(iter(INFO_YOUTUBE)))
+
+
+def baixar_reaproveitando(ydl: Any, url: str) -> None:
+    """Baixa usando os metadados já lidos, como o `yt-dlp --load-info-json`.
+
+    Se os links guardados tiverem expirado, o próprio yt-dlp volta a consultar
+    pela URL. Sem metadados guardados, faz o download normal.
+    """
+    info = INFO_YOUTUBE.pop(url, None)
+    if not info:
+        aguardar_vez_youtube()
+        ydl.download([url])
+        return
+    fd, caminho = tempfile.mkstemp(prefix=".pltube-info-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
+            json.dump(info, arquivo, ensure_ascii=False)
+        ydl.download_with_info_file(caminho)
+    finally:
+        try:
+            os.unlink(caminho)
+        except OSError:
+            pass
 
 
 def nome_seguro(valor: str, fallback: str = "sem-nome") -> str:
@@ -1408,10 +1498,11 @@ def baixar_musica(
                     {"key": "FFmpegMetadata"},
                 ],
             }
+            ydl_opts["sleep_interval_requests"] = PAUSA_ENTRE_REQUISICOES
             if ESPERAR_BLOQUEIO:
                 ydl_opts.update({"retries": 0, "extractor_retries": 0, "fragment_retries": 0})
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+                baixar_reaproveitando(ydl, url)
             if not os.path.isfile(filepath_mp3):
                 raise RuntimeError(
                     "O download não produziu o arquivo esperado. " + " ".join(logger.errors)

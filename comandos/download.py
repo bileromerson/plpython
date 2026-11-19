@@ -15,7 +15,7 @@ NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
 OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --no-artist-links\n"
-          "--wait-on-limit  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
+          "--wait-on-limit  --sleep  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
           "--require-isrc  --require-mb-artist")
 EXEMPLOS = """\
   plpython.py download -c ./csvs                      # identifica artista, álbum e capa
@@ -24,7 +24,19 @@ EXEMPLOS = """\
   plpython.py download -c ./csvs -s Musicas -p ./m3u
   plpython.py download -c ./csvs --prefer-db          # MusicBrainz vence divergências
   plpython.py download -c ./csvs --review diff        # só pede conferência de divergências
-  plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube"""
+  plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube
+  plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa"""
+
+
+def _pausa(valor: str) -> tuple[float, float]:
+    try:
+        partes = [float(v) for v in valor.replace(",", ".").split("-", 1)]
+    except ValueError:
+        raise argparse.ArgumentTypeError("use segundos, ex.: 8 ou 5-10") from None
+    minimo, maximo = (partes[0], partes[-1])
+    if minimo < 0 or maximo < minimo:
+        raise argparse.ArgumentTypeError("use MIN-MAX com 0 <= MIN <= MAX, ex.: 5-10")
+    return (minimo, maximo)
 
 
 def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
@@ -46,7 +58,12 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
                         "(padrão: o MP3 fica no artista principal e os outros recebem um atalho)")
     oculto(p, "--artist-links", dest="artist_links", action="store_true")
     p.add_argument("--wait-on-limit", dest="esperar_bloqueio", action="store_true",
-                   help="espera e tenta de novo se o YouTube bloquear (30s → 10min, até 6x)")
+                   help="se o YouTube bloquear, espera sozinho e tenta de novo: limite da sessão "
+                        "(dura até 1 h) 5, 15, 30 e 60 min; falha de rede 30 s até 10 min")
+    p.add_argument("--sleep", dest="pausa", type=_pausa, default=(5.0, 10.0), metavar="MIN[-MAX]",
+                   help="pausa entre vídeos no YouTube, em segundos, sorteada entre MIN e MAX "
+                        "(padrão: 5-10, como recomenda o yt-dlp; o tempo do download já conta). "
+                        "0 desliga")
     oculto(p, "--esperar-bloqueio", dest="esperar_bloqueio", action="store_true")
     if not update:
         p.add_argument("--retry", dest="reprocess", action="store_true",
