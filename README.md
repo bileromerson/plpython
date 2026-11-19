@@ -210,6 +210,17 @@ O nome de um canal de re-upload nunca vira artista.
 
 Uma parte com "OST", "trilha sonora", "tema de", "abertura", "Netflix", "novela" ou "série" nunca vira artista. Sem pista nenhuma, fica o formato comum, "Artista - Música". Essas consultas extras (até seis) só acontecem nesses casos.
 
+**Canal e banco em qualquer parte do título.** O título é cortado em todas as divisórias ("-", "–", "|", "·", "//", ";", ":", aspas) e cada pedaço é comparado com o nome de quem enviou o vídeo (o canal) e com os artistas já confirmados no banco. O pedaço que bate é o artista; a música é o pedaço mais próximo que não seja ruído ("com cifras", "Lyrics", "Vídeo Clip...") nem a obra. Sem divisória, vale o nome colado no começo ou no fim. Exemplos:
+
+| Título | Achado por | Resultado |
+|---|---|---|
+| Liberdade Provisória - Henrique e Juliano - com cifras | banco (Henrique & Juliano) | Henrique & Juliano — Liberdade Provisória |
+| ACDC Thunderstruck ( official video ) | banco (AC/DC) | AC/DC — Thunderstruck |
+| Bella Ciao (Música Original de la Serie) · Manu Pilas | canal "Manu Pilas - Topic" | Manu Pilas — Bella Ciao |
+| Imagine Dragons - Believer | canal "ImagineDragons" | Imagine Dragons — Believer (grafia do título) |
+
+Um nome que só aparece no "feat." não conta como artista principal, e o canal que aparece só num pedaço solto do fim ("... | WaterTower") é tratado como selo, com pouco peso.
+
 **3. Confirmação no MusicBrainz.** As melhores hipóteses são buscadas (as duas ordens de "A - B" quando há dúvida). Com uma correspondência, entram a grafia oficial, os créditos completos, o ISRC e os IDs MusicBrainz.
 
 **4. Álbum e capa.** Entre os lançamentos da gravação, é escolhido o mais provável, como o Picard faz: o álbum citado pelo YouTube, se houver; senão oficial, álbum/EP/single antes de coletânea/ao vivo, o mais antigo. Vão para o MP3: álbum, artista do álbum, data, faixa "n/total", disco, distribuidora, ISRC e IDs MusicBrainz. A **capa do álbum** vem do Cover Art Archive (a do release-group, que é igual entre edições) e substitui a thumbnail do vídeo. Sem capa no Cover Art Archive, a thumbnail do vídeo é recortada para ficar quadrada; no YouTube Music ela já é a capa.

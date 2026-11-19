@@ -690,7 +690,7 @@ _VARIANTE = re.compile(
 _RUIDO_PARENTESES = re.compile(
     r"\s*[\[(【](?:[^\])】]*?\b(?:official|oficial|lyrics?|letras?|legendad[oa]|"
     r"tradu[cç][aã]o|visuali[sz]er|audio|áudio|video|vídeo|clipe|mv|hd|4k|hq|release|"
-    r"explicit|copyright|original\s+song|from\s+the|from\s+[\"“]|ost)\b[^\])】]*)[\])】]",
+    r"explicit|copyright|original\s+song|m[uú]sica\s+original|from\s+the|from\s+[\"“]|ost)\b[^\])】]*)[\])】]",
     re.I,
 )
 _RUIDO_FINAL = re.compile(
@@ -1140,6 +1140,104 @@ def avaliar_canal(
     return {"nome": nome, "bruto": bruto, "tipo": tipo, "pontos": pontos, "motivos": motivos}
 
 
+_DIVISORIAS = re.compile(
+    r"\s+[-–—|｜·•~]\s+|\s*//\s*|\s*;\s+|\s*:\s+|\s*[\"“”«»]\s*|(?<=\S)\s+[-–—](?=\S)|(?<=\S)[-–—]\s+"
+)
+# Pedaços que só descrevem o vídeo: "com cifras", "Vídeo Clip versão Amanda", "Lyrics"
+_PARTE_RUIDO = re.compile(
+    r"^(?:com\s+cifras?|cifras?|letra|lyrics?|legendad[oa]|karaok[eê]|official\b.*|oficial\b.*|"
+    r"v[ií]deo\s*clip.*|clipe\b.*|music\s+video|audio|áudio.*|hd|4k|hq|ao\s+vivo|live)$",
+    re.I,
+)
+
+
+def partes_do_titulo(texto: Any) -> list[str]:
+    """Todos os pedaços do título, cortando em qualquer divisória
+    ("-", "–", "|", "·", "//", ";", ":", aspas)."""
+    partes = (re.sub(r"^(?:(?:remix|cover|vers[aã]o)\s+)?(?:by|por|de)\s+", "", p.strip(" -–—|'"), flags=re.I)  # '"Música" by Artista'
+              for p in _DIVISORIAS.split(_text(texto)) if p)
+    return [p for p in partes if p]
+
+
+def _sem_espaco(texto: str) -> str:
+    return _normalize_text(texto).replace(" ", "")
+
+
+def _mesmo_titulo(a: str, b: str) -> bool:
+    return bool(_sem_espaco(a)) and _sem_espaco(_sem_parenteses(a)) == _sem_espaco(_sem_parenteses(b))
+
+
+def _nome_inteiro(nome: str, pedaco: str) -> bool:
+    """O pedaço é o nome todo (só muda a grafia), e não "Outro & Nome"."""
+    a, b = _sem_espaco(nome), _sem_espaco(_sem_parenteses(pedaco))
+    return bool(a and b) and (a == b or _similarity(a, b) >= 0.88)
+
+
+def artista_nas_partes(
+    texto: Any, candidatos: Sequence[str], preferidos: Sequence[str] = ()
+) -> tuple[str, str, str] | None:
+    """Procura, entre os pedaços do título, um que seja um dos `candidatos`
+    (canal que enviou, artistas do banco). Devolve (candidato, pedaço do artista, música).
+
+    "Liberdade Provisória - Henrique e Juliano - com cifras" + "Henrique & Juliano"
+    → ("Henrique & Juliano", "Henrique e Juliano", "Liberdade Provisória").
+    Sem divisória, aceita o nome no começo ou no fim: "ACDC Thunderstruck" + "AC/DC"."""
+    candidatos = [c for c in dict.fromkeys(_text(c) for c in candidatos) if c]
+    if not candidatos:
+        return None
+    partes = partes_do_titulo(texto)
+
+    def sem_feat(pedaco: str) -> str:
+        limpo = _sem_parenteses(pedaco)
+        ft = _TITLE_FEAT.search(limpo)
+        return limpo[: ft.start()].strip() if ft and ft.start() > 0 else limpo
+
+    def quem(pedaco: str) -> str | None:
+        limpo = sem_feat(pedaco)  # "Bad Habits feat. BMTH": BMTH é participação, não o artista
+        for nome in candidatos:
+            if _sem_espaco(nome) == _sem_espaco(limpo) or (
+                    len(_sem_espaco(nome)) >= 4 and _mesmo_nome(nome, limpo)
+                    and len(_normalize_text(limpo).split()) <= len(_normalize_text(nome).split()) + 2):
+                return nome
+        for nome in candidatos:
+            if any(_mesmo_nome(nome, a) and _sem_espaco(a) == _sem_espaco(nome)
+                   for a in dividir_artistas(limpo)):
+                return nome  # "Calvin Harris, Dua Lipa" contém "Dua Lipa"
+        return None
+
+    if len(partes) >= 2:
+        for i, pedaco in enumerate(partes):
+            nome = quem(pedaco)
+            if not nome:
+                continue
+            # a música é o pedaço mais perto do artista que não é ruído nem a obra/trilha
+            resto = sorted(
+                (j for j, p in enumerate(partes) if j != i and not _PARTE_RUIDO.match(_sem_parenteses(p))
+                 and not quem(p)),
+                key=lambda j: (parece_obra(partes[j]), not any(_mesmo_titulo(partes[j], p) for p in preferidos),
+                               abs(j - i), j))
+            if resto:
+                musica = re.sub(r"\s+(?:oficial|official)\b\s*(?=(?:[(\[][^)\]]*[)\]])?\s*$)", " ",
+                                partes[resto[0]], flags=re.I).strip()
+                musica = re.sub(r"^\[[^\]]*\]\s*", "", musica) or musica or partes[resto[0]]  # "[Deluxe] X"
+                if (ft := _TITLE_FEAT.search(musica)) and ft.start() > 0:
+                    musica = musica[: ft.start()].strip()  # o "feat." já entra nos artistas
+                return nome, sem_feat(pedaco), musica
+        return None
+    # um pedaço só: o nome pode estar colado no começo ou no fim
+    palavras = sem_feat(_text(partes[0] if partes else texto)).split()
+    for nome in candidatos:
+        alvo = _sem_espaco(nome)
+        if len(alvo) < 3:
+            continue
+        for k in range(1, len(palavras)):
+            for artista, musica in ((palavras[:k], palavras[k:]), (palavras[-k:], palavras[:-k])):
+                musica = re.sub(r"\s+(?:by|por|de)$", "", " ".join(musica), flags=re.I)  # "My Demons by"
+                if _sem_espaco(" ".join(artista)) == alvo and _sem_espaco(musica):
+                    return nome, " ".join(artista), musica
+    return None
+
+
 def hipoteses_youtube(
     yt: Mapping[str, Any],
     canal_conhecido: Mapping[str, Any] | None = None,
@@ -1206,7 +1304,8 @@ def hipoteses_youtube(
             artistas = dividir_artistas(_sem_parenteses(lado_artista), conhecidos)
             if not artistas or parece_obra(lado_artista):
                 continue
-            if any(conhecido(a) for a in artistas) or conhecido(_sem_parenteses(lado_artista)):
+            inteiro = len(partes_do_titulo(_sem_parenteses(lado_artista))) <= 1  # "H e J - com cifras" não
+            if inteiro and (any(conhecido(a) for a in artistas) or conhecido(_sem_parenteses(lado_artista))):
                 add(lado_titulo, artistas, "artista_conhecido", 0.9)
             if canal["nome"] and canal["tipo"] != "curador" and (
                 _mesmo_nome(canal["nome"], _sem_parenteses(lado_artista))
@@ -1244,11 +1343,33 @@ def hipoteses_youtube(
         elif conhecido(limpo):
             add(base, dividir_artistas(limpo, conhecidos), "youtube_titulo_segmento", 0.82, bruto=limpo)
 
+    # O nome de quem enviou (canal) ou de um artista do banco aparece em algum pedaço do título?
+    titulo_bruto = _remover_simbolos(_text(yt.get("video_title") or yt.get("title")))
+    titulo_bruto = _RUIDO_FINAL.sub("", _RUIDO_PARENTESES.sub("", titulo_bruto)).strip()
+    preferidos = [base, *(lados or ())]  # o que a análise do título já achou que é a música
+    no_titulo = artista_nas_partes(titulo_bruto, [canal["nome"]], preferidos) if canal["nome"] else None
+    if no_titulo:
+        prior = 0.91 if canal["tipo"] == "artista" else 0.6 if canal["tipo"] == "curador" else 0.86
+        if _nome_inteiro(no_titulo[0], no_titulo[1]):
+            limpo = _sem_parenteses(no_titulo[1])
+            artistas = [next((a for a in artistas_conhecidos if _nome_inteiro(a, limpo)), limpo)]
+        else:
+            artistas = dividir_artistas(no_titulo[1], conhecidos) or [no_titulo[0]]
+        if lados and not any(_sem_espaco(no_titulo[1]) in _sem_espaco(l) for l in lados):
+            prior = min(prior, 0.55)  # "A - Música | WaterTower": o canal no fim é selo/curadoria
+        add(no_titulo[2], artistas,
+            "youtube_titulo_parte_canal", prior, bruto=no_titulo[1])
+    do_banco = artista_nas_partes(titulo_bruto, [a for a in artistas_conhecidos if _text(a)], preferidos)
+    if do_banco:
+        add(do_banco[2], [do_banco[0]] if _nome_inteiro(do_banco[0], do_banco[1])
+            else dividir_artistas(do_banco[1], conhecidos) or [do_banco[0]],
+            "youtube_titulo_parte_banco", 0.91, bruto=do_banco[1])
+
     nome = canal["nome"]
     titulo_canal = base if not lados else lados[1]
     if nome:
         if re.search(r"-\s*topic\s*$", canal["bruto"], re.I):
-            add(base, [nome], "youtube_canal_topic", 0.95)
+            add(no_titulo[2] if no_titulo else base, [nome], "youtube_canal_topic", 0.95)
         elif canal_conhecido and canal_conhecido.get("kind") == "artista":
             add(titulo_canal if lados and _mesmo_nome(nome, lados[0]) else base,
                 canal_conhecido.get("artists") or [nome], "canal_aprendido", 0.92)

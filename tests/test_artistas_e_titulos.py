@@ -165,3 +165,32 @@ class TitulosReaisTests(unittest.TestCase):
             res = r.resolver_com_prioridade("x", dados, consultar_musicbrainz=False)
             self.assertEqual(([a.casefold() for a in res.metadata["artists"]], res.metadata["title"]),
                              ([a.casefold() for a in artistas], titulo), video)
+
+
+class PartesDoTituloTests(unittest.TestCase):
+    """Canal ou artista do banco em qualquer pedaço do título."""
+
+    CASOS = [
+        # título, canal, artistas do banco, artistas esperados, música esperada
+        ("Liberdade Provisória - Henrique e Juliano - com cifras", "Fulano Cifras", ["Henrique & Juliano"],
+         ["Henrique & Juliano"], "Liberdade Provisória"),
+        ("ACDC Thunderstruck ( official video )", "Some Guy", ["AC/DC"], ["AC/DC"], "Thunderstruck"),
+        ("Earth Wind & Fire “September ”", "Rand", ["Earth, Wind & Fire"], ["Earth, Wind & Fire"], "September"),
+        ("Bella Ciao (Música Original de la Serie) · Manu Pilas", "Manu Pilas - Topic", [],
+         ["Manu Pilas"], "Bella Ciao"),
+        ("Logo Eu - Jorge e Mateus", "Jorge & Mateus", ["Jorge & Mateus"], ["Jorge & Mateus"], "Logo Eu"),
+        ("Imagine Dragons - Believer (Official Music Video)", "ImagineDragons", [],
+         ["Imagine Dragons"], "Believer"),
+        ("[FORMER FAN LYRIC VIDEO] My Demons by Starset", "GWLyrics", ["STARSET"], ["STARSET"], "My Demons"),
+        ("Ed Sheeran - Bad Habits feat. Bring Me The Horizon (official audio)", "Bring Me The Horizon", [],
+         ["Ed Sheeran", "Bring Me The Horizon"], "Bad Habits"),
+    ]
+
+    def test_casos(self):
+        for titulo, canal, banco, artistas, musica in self.CASOS:
+            h = r.hipoteses_youtube({"title": titulo, "uploader": canal}, None, banco)[0]
+            self.assertEqual((h["artists"], h["title"]), (artistas, musica), titulo)
+
+    def test_partes(self):
+        self.assertEqual(r.partes_do_titulo('Cult of the Lamb Song - "Fool\'s Gold" by ivycomb'),
+                         ["Cult of the Lamb Song", "Fool's Gold", "ivycomb"])
