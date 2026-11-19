@@ -83,19 +83,56 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(client.isrc_calls, [("USAAA9900001", 10)])
         self.assertEqual(client.cover_calls, [("", release_id)])
 
-    def test_empate_no_banco_nao_e_escolhido_as_cegas(self):
+    def test_entradas_repetidas_da_mesma_musica_sao_juntadas(self):
         iguais = [
-            {"recording_id": f"{n}6666666-6666-4666-8666-666666666666", "title": "Canção Nova",
-             "artists": ["Artista"], "isrcs": [], "duration": 180 + n, "releases": []}
-            for n in (6, 7)
+            {"recording_id": f"{n}6666666-6666-4666-8666-666666666666", "title": "A Moment Apart",
+             "artists": ["ODESZA"], "isrcs": [], "duration": 180 + n,
+             "releases": [{"id": f"{n}1111111-1111-4111-8111-111111111111", "title": t, "status": "Official",
+                           "primary_type": p, "date": d, "artists": ["ODESZA"]}]}
+            for n, t, p, d in ((6, "A Moment Apart", "Album", "2017-09-08"), (7, "A Moment Apart (single)", "Single", "2017-11-01"))
         ]
         resultado = resolver.resolver_com_prioridade(
-            "vid001", {"title": "Canção Nova", "artists": ["Artista"], "duration": 180},
-            musicbrainz_client=FakeMusicBrainz(by_title_artist=iguais),
+            "vid001", {"title": "A Moment Apart", "artists": ["ODESZA"], "duration": 180},
+            musicbrainz_client=FakeMusicBrainz(by_title_artist=iguais, cover_url="https://c/x.jpg"),
+        )
+        self.assertNotEqual(resultado.metadata["musicbrainz_recording_id"], "")
+        self.assertEqual(resultado.metadata["album"], "A Moment Apart")  # álbum oficial, entre os dois
+        self.assertEqual(resultado.status, "RESOLVIDO", resultado.observations)
+
+    def test_empate_entre_musicas_diferentes_nao_e_escolhido_as_cegas(self):
+        diferentes = [
+            {"recording_id": f"{n}6666666-6666-4666-8666-666666666666", "title": "Canção Nova",
+             "artists": [artista], "isrcs": [], "duration": 180, "releases": []}
+            for n, artista in ((6, "Banda A"), (7, "Banda B"))
+        ]
+        resultado = resolver.resolver_com_prioridade(
+            "vid001", {"title": "Canção Nova", "duration": 180},
+            musicbrainz_client=FakeMusicBrainz(by_title=diferentes),
         )
         self.assertEqual(resultado.metadata["musicbrainz_recording_id"], "")
-        self.assertEqual(len(resultado.candidates), 2)
         self.assertNotEqual(resultado.status, "RESOLVIDO")
+
+    def test_musicbrainz_ocupado_tenta_de_novo(self):
+        import urllib.error
+        respostas = [urllib.error.HTTPError("u", 503, "busy", {}, None), b'{"recordings": []}']
+        esperas = []
+
+        def transporte(url, headers, timeout):
+            r = respostas.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        client = resolver.MusicBrainzClient(transport=transporte, sleeper=esperas.append, min_interval=0)
+        self.assertEqual(client.search_by_isrc("USAAA9900001"), [])
+        self.assertEqual(esperas[0], resolver.ESPERAS_MUSICBRAINZ[0])
+
+    def test_canal_que_fez_o_remix_nao_vira_o_artista(self):
+        resultado = resolver.resolver_com_prioridade(
+            "v", {"title": "Domalomn - Urgently Jammin' (Sir Meow Remix)", "uploader": "Sir Meow"},
+            consultar_musicbrainz=False)
+        self.assertEqual((resultado.metadata["artists"], resultado.metadata["title"]),
+                         (["Domalomn"], "Urgently Jammin' (Sir Meow Remix)"))
 
     def test_capa_frontal_e_nao_a_de_tras(self):
         payload = {"images": [

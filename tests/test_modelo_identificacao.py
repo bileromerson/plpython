@@ -185,6 +185,19 @@ class MemoriaEArquivosTests(unittest.TestCase):
                                                        "metadata": {"title": "t", "artists": ["Palpite"]}})
         self.assertEqual(pltube.carregar_artistas_conhecidos(self.db), ["snuffles"])
 
+    def test_dados_crus_nao_apagam_o_status_e_banco_antigo_e_consertado(self):
+        pltube.salvar_resolucao(self.db, "youtube:x", {"video_id": "x", "status": "OBSERVAR",
+                                                      "metadata": {"title": "t", "artists": ["a"]}})
+        pltube._salvar_metadados_musica(self.db, "youtube:x", {"title": "t", "artists": ["a"], "id": "x"})
+        status = lambda: self.db.execute("SELECT metadata_status FROM music.music_tracks WHERE video_key='youtube:x'").fetchone()[0]  # noqa: E731
+        self.assertEqual(status(), "OBSERVAR")
+        self.db.execute("UPDATE music.music_tracks SET metadata_status='NAO_VALIDADO'")
+        self.db.commit()
+        caminhos = {r[1]: r[2] for r in self.db.execute("PRAGMA database_list")}
+        self.db.close()
+        self.db = pltube.abrir_banco_estado(caminhos["main"], caminhos["music"])
+        self.assertEqual(status(), "OBSERVAR")
+
     def test_sem_confirmacao_nao_aprende(self):
         pltube.aprender_canal(self.db, "v1", self.resultado(["x"], prov="youtube_titulo_artista_primeiro"))
         self.assertIsNone(pltube.perfil_canal(self.db, pltube.chave_canal({"channel_id": "UC1"})))

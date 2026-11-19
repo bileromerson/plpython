@@ -83,6 +83,9 @@ class ResolutionResult:
         return asdict(self)
 
 
+ESPERAS_MUSICBRAINZ = (2.0, 5.0, 15.0, 30.0)  # novas tentativas em 503/falha de rede
+
+
 class MusicBrainzClient:
     """Cliente pequeno para buscas de gravações e capas.
 
@@ -143,19 +146,31 @@ class MusicBrainzClient:
             "User-Agent": self.user_agent,
             "Accept": "application/json",
         }
-        try:
-            body = self._transport(url, headers, self.timeout)
-            payload = json.loads(body.decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise MusicBrainzError(
-                f"HTTP {exc.code} consultando metadados externos.", exc.code
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise MusicBrainzError(f"Falha de conexão: {exc.reason}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise MusicBrainzError("A API retornou JSON inválido.") from exc
-        except TimeoutError as exc:
-            raise MusicBrainzError("Tempo limite ao consultar a API.") from exc
+        # O MusicBrainz responde 503 quando está sobrecarregado ou limitando o
+        # ritmo; a documentação pede para esperar e tentar de novo.
+        esperas = (*ESPERAS_MUSICBRAINZ, None)
+        for espera in esperas:
+            try:
+                body = self._transport(url, headers, self.timeout)
+                payload = json.loads(body.decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in (502, 503, 504) and espera is not None:
+                    v("MusicBrainz", f"HTTP {exc.code} (serviço ocupado); tentando de novo em {espera:.0f}s")
+                    self._sleep(espera)
+                    continue
+                raise MusicBrainzError(
+                    f"HTTP {exc.code} consultando metadados externos.", exc.code
+                ) from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if espera is not None:
+                    v("MusicBrainz", f"falha de conexão; tentando de novo em {espera:.0f}s")
+                    self._sleep(espera)
+                    continue
+                motivo = getattr(exc, "reason", None) or "tempo limite"
+                raise MusicBrainzError(f"Falha de conexão: {motivo}") from exc
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise MusicBrainzError("A API retornou JSON inválido.") from exc
         if not isinstance(payload, dict):
             raise MusicBrainzError("A resposta JSON não é um objeto.")
         self._json_cache[url] = copy.deepcopy(payload)
@@ -720,6 +735,20 @@ def _mesmo_nome(a: str, b: str) -> bool:
     return len("".join(menor)) >= 4 and menor <= maior
 
 
+_PARENTESES = re.compile(r"\s*[\[(【][^\])】]*[\])】]")
+_REMIXER = re.compile(r"[\[(]\s*(.+?)\s+(?:remix|edit|flip|bootleg|vip|rework|mix|cover)\s*[\])]", re.I)
+
+
+def _sem_parenteses(texto: str) -> str:
+    """'Urgently Jammin' (Sir Meow Remix)' -> 'Urgently Jammin''."""
+    return _PARENTESES.sub("", _text(texto)).strip()
+
+
+def _remixers(texto: str) -> list[str]:
+    """Quem fez o remix/edit citado entre parênteses: '(Sir Meow Remix)' -> ['Sir Meow']."""
+    return [m.group(1) for m in _REMIXER.finditer(_text(texto))]
+
+
 def dividir_artistas(texto: str) -> list[str]:
     """Separa colaborações ("A, B", "A x B", "A & B & C") sem quebrar nomes de
     banda com um único "&" ("Mumford & Sons"); o MusicBrainz corrige o resto."""
@@ -887,8 +916,11 @@ def avaliar_canal(
     analise = analisar_titulo(yt.get("video_title") or yt.get("title") or "")
     pedacos = list(analise["lados"] or ()) + list(analise["segmentos"]) + list(analise["por"] or ())
     if nome and pedacos:
-        if any(_mesmo_nome(nome, p) or any(_mesmo_nome(nome, a) for a in dividir_artistas(p)) for p in pedacos):
+        if any(_mesmo_nome(nome, _sem_parenteses(p)) or any(_mesmo_nome(nome, a) for a in dividir_artistas(_sem_parenteses(p)))
+               for p in pedacos):
             sinal(3, "canal aparece no título como artista")
+        elif any(_mesmo_nome(nome, r) for p in pedacos for r in _remixers(p)):
+            sinal(3, "canal é quem fez o remix citado no título")
         elif analise["lados"]:
             sinal(-2, "título traz outro artista que não é o canal")
     if nome and any(_mesmo_nome(nome, a) for a in artistas_conhecidos):
@@ -958,18 +990,25 @@ def hipoteses_youtube(
 
     if lados:
         for lado_artista, lado_titulo in (lados, lados[::-1]):
-            artistas = dividir_artistas(lado_artista)
-            if any(conhecido(a) for a in artistas) or conhecido(lado_artista):
+            # parênteses não identificam o artista: "(Sir Meow Remix)" é o remixer
+            artistas = dividir_artistas(_sem_parenteses(lado_artista))
+            if not artistas:
+                continue
+            if any(conhecido(a) for a in artistas) or conhecido(_sem_parenteses(lado_artista)):
                 add(lado_titulo, artistas, "artista_conhecido", 0.9)
             if canal["nome"] and canal["tipo"] != "curador" and (
-                _mesmo_nome(canal["nome"], lado_artista)
+                _mesmo_nome(canal["nome"], _sem_parenteses(lado_artista))
                 or any(_mesmo_nome(canal["nome"], a) for a in artistas)
             ):
                 add(lado_titulo, artistas, "youtube_titulo_canal",
                     0.9 if canal["tipo"] == "artista" else 0.85)
+            if canal["nome"] and any(_mesmo_nome(canal["nome"], r) for r in _remixers(lado_titulo)):
+                add(lado_titulo, artistas, "youtube_titulo_remix_do_canal", 0.85)
         curador = canal["tipo"] == "curador"
-        add(lados[1], dividir_artistas(lados[0]), "youtube_titulo_artista_primeiro", 0.72 if curador else 0.62)
-        add(lados[0], dividir_artistas(lados[1]), "youtube_titulo_artista_depois", 0.4 if curador else 0.45)
+        add(lados[1], dividir_artistas(_sem_parenteses(lados[0])) or dividir_artistas(lados[0]),
+            "youtube_titulo_artista_primeiro", 0.72 if curador else 0.62)
+        add(lados[0], dividir_artistas(_sem_parenteses(lados[1])) or dividir_artistas(lados[1]),
+            "youtube_titulo_artista_depois", 0.4 if curador else 0.45)
     if analise["por"]:
         titulo, artista = analise["por"]
         add(titulo, dividir_artistas(artista), "youtube_titulo_by", 0.75)
@@ -991,6 +1030,27 @@ def hipoteses_youtube(
             add(base, [nome], "youtube_canal", 0.4)
     add(base, [], "youtube_somente_titulo", 0.1)
     return sorted(hipoteses.values(), key=lambda h: h["prior"], reverse=True)
+
+
+def _fundir_duplicatas(ranked: Sequence[tuple[Mapping[str, Any], float]], margem: float) -> dict[str, Any] | None:
+    """O MusicBrainz costuma ter várias gravações da MESMA música (single, álbum,
+    remaster...). Se as empatadas têm o mesmo título e artistas, não é ambiguidade:
+    junta os lançamentos de todas para escolher o álbum."""
+    topo, nota = ranked[0]
+    grupo = [c for c, sc in ranked if nota - sc <= margem]
+    if len(grupo) < 2 or not all(
+        _mesmo_texto(_text(c.get("title")), _text(topo.get("title")), 0.95)
+        and sorted(map(_normalize_text, _artists(c.get("artists"))))
+        == sorted(map(_normalize_text, _artists(topo.get("artists"))))
+        for c in grupo
+    ):
+        return None
+    unido = dict(topo)
+    vistos: set[str] = set()
+    unido["releases"] = [r for c in grupo for r in c.get("releases") or []
+                         if isinstance(r, Mapping) and r.get("id") not in vistos and not vistos.add(r.get("id"))]
+    unido["isrcs"] = list(dict.fromkeys(i for c in grupo for i in c.get("isrcs") or []))
+    return unido
 
 
 def _mesmo_texto(a: str, b: str, limiar: float = 0.9) -> bool:
@@ -1224,6 +1284,10 @@ def resolver_com_prioridade(
                                           f"{_text(cand.get('title'))}  ({len(cand.get('releases') or [])} lançamentos)")
                     limiar = limiar_correspondencia if h["artists"] else max(limiar_correspondencia, 0.9)
                     chosen, ambiguo = _choose_ranked(ranked, threshold=limiar, margin=margem_correspondencia)
+                    if chosen is None and ambiguo and ranked[0][1] >= limiar:
+                        chosen = _fundir_duplicatas(ranked, margem_correspondencia)
+                        if chosen is not None:
+                            v("MusicBrainz", "  empate entre entradas da mesma música; juntando os lançamentos")
                     if chosen is None:
                         v("MusicBrainz", f"  nenhum candidato confiável (melhor nota {ranked[0][1]:.2f}, mínimo "
                                          f"{limiar:.2f}{', empate entre candidatos' if ambiguo else ''})")
@@ -1346,6 +1410,8 @@ def resolver_com_prioridade(
                             f"(confiança {base['prior']:.0%})")
         if base["prior"] < LIMIAR_CONFIANCA:
             de_onde = {
+                "youtube_titulo_segmento": "do título do vídeo (parte depois de \"|\")",
+                "youtube_titulo_remix_do_canal": "do título do vídeo (remix feito pelo canal)",
                 "youtube_titulo_artista_primeiro": "do título do vídeo (\"Artista - Música\")",
                 "youtube_titulo_artista_depois": "do título do vídeo (\"Música - Artista\")",
                 "youtube_canal": "do nome do canal, que pode não ser o artista",
