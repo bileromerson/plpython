@@ -18,13 +18,13 @@ from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, opcoes_
 NOME = "review"
 APELIDOS = ("revisar",)
 RESUMO = "mostra e confirma as faixas do banco SQL direto no terminal"
-OPCOES = "--answer  --default-ok  --status  --busca  -d  --ok ID...  --ok-all  --export  --sql"
+OPCOES = "--answer  --default-ok  --status  --search  -d/--details  --ok ID...  --ok-all  --export  --sql"
 EXEMPLOS = """\
   plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)
   plpython.py review --answer             # responde uma por uma (Enter = deixa na lista)
   plpython.py review --answer --default-ok   # Enter = aceita (conflito: banco; vazio: Unknown)
   plpython.py review -d                   # com álbum, arquivo e link do YouTube
-  plpython.py review --status todas --busca snuffles
+  plpython.py review --status all --search snuffles
   plpython.py review --ok UG1HUOyL9IA njowoGhmw6E
   plpython.py review --ok-all             # confirma todas as OBSERVAR
   plpython.py review --export conferir.csv
@@ -32,20 +32,21 @@ EXEMPLOS = """\
 
 DESCONHECIDO = "Unknown"
 STATUS_FILTRO = {
-    "revisar": ("PENDENTE", "OBSERVAR"),
-    "observar": ("OBSERVAR",),
-    "pendente": ("PENDENTE",),
-    "resolvido": ("RESOLVIDO",),
-    "todas": (),
+    "open": ("PENDENTE", "OBSERVAR"),
+    "observe": ("OBSERVAR",),
+    "pending": ("PENDENTE",),
+    "resolved": ("RESOLVIDO",),
+    "all": (),
 }
 
 
 def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
     p = novo_parser(prog, "Mostra as faixas guardadas em ./sql/ e permite confirmá-las.", EXEMPLOS)
-    p.add_argument("--status", choices=list(STATUS_FILTRO), default="revisar",
-                   help="quais faixas mostrar (padrão: revisar = OBSERVAR + PENDENTE)")
-    p.add_argument("--busca", metavar="TEXTO", help="filtra por título, artista, álbum ou ID do vídeo")
-    p.add_argument("-d", "--detalhes", action="store_true", help="mostra álbum, ISRC, arquivo e link")
+    p.add_argument("--status", choices=list(STATUS_FILTRO), default="open",
+                   help="quais faixas mostrar: open = OBSERVAR + PENDENTE (padrão), observe = OBSERVAR, "
+                        "pending = PENDENTE, resolved = RESOLVIDO, all = todas")
+    p.add_argument("--search", dest="busca", metavar="TEXTO", help="filtra por título, artista, álbum ou ID do vídeo")
+    p.add_argument("-d", "--details", dest="detalhes", action="store_true", help="mostra álbum, ISRC, arquivo e link")
     p.add_argument("--ok", nargs="+", metavar="VIDEO_ID",
                    help="marca as faixas como conferidas (RESOLVIDO), mantendo título/artista atuais")
     p.add_argument("--ok-all", action="store_true", help="confirma todas as faixas OBSERVAR de uma vez")
@@ -134,7 +135,7 @@ def listar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         "SELECT metadata_status, COUNT(*) FROM music.music_tracks GROUP BY metadata_status"
     ).fetchall()
     print("\nTotal: " + ", ".join(f"{s}={n}" for s, n in contagem))
-    if args.status in ("revisar", "observar", "pendente"):
+    if args.status in ("open", "observe", "pending"):
         print("Se estiver certo: plpython.py review --ok VIDEO_ID [VIDEO_ID ...]  (ou --ok-all)")
     return 0
 

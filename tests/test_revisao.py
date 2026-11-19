@@ -40,7 +40,7 @@ class RevisaoTests(unittest.TestCase):
         self.assertIn("[OBSERVAR] aaa  snuffles — Faixa aaa", saida)
         self.assertIn("título diverge", saida)
         self.assertNotIn("Faixa bbb", saida)
-        _, saida = self.rodar("--status", "todas")
+        _, saida = self.rodar("--status", "all")
         self.assertIn("Faixa bbb", saida)
 
     def test_ok_confirma(self):

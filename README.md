@@ -188,7 +188,7 @@ No terminal, sem precisar de programa de SQL:
 ```bash
 python plpython.py review                       # faixas OBSERVAR/PENDENTE com o motivo
 python plpython.py review -d                    # + álbum, ISRC, arquivo e link do YouTube
-python plpython.py review --status todas --busca snuffles
+python plpython.py review --status all --search snuffles
 python plpython.py review --ok UG1HUOyL9IA      # está certo: marca como conferida
 python plpython.py review --ok-all              # confirma todas as OBSERVAR
 python plpython.py review --export conferir.csv # abre no Excel/LibreOffice
