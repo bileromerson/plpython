@@ -175,6 +175,7 @@ Para cada faixa `OBSERVAR`/`PENDENTE`, aparece o que está errado e uma pergunta
 | `:ok` (no título) | está tudo certo como está |
 | `:s` / `:q` (no título) | pula esta faixa / sai (o que já foi respondido fica salvo) |
 
+- **Só os campos com problema (⚠) são perguntados.** Cada motivo aponta um campo: "título diverge" → título; "artista diverge" → artistas; "deduzidos do título/canal" → título e artistas; "álbum não encontrado" → álbum; ISRC → ISRC. Os demais aparecem com ✓. Use `--all-fields` para perguntar todos.
 - **Sem `--default-ok`:** a faixa que você deixar toda em branco **continua na lista**. Se você mudou algum campo (ou respondeu `:ok`), ela é dada como conferida, e só os campos digitados mudam.
 - **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`. Todas saem da lista.
 - **Cada resposta é gravada na hora**, igual ao `metadata --apply`: tags do MP3 (com backup), banco e M3Us. Se o artista principal mudar, o MP3 vai para a pasta do novo artista, com atalhos para os secundários, e sai de `_observar/`. O `update` não desfaz correções manuais.

@@ -59,6 +59,8 @@ def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
     r.add_argument("--default-ok", dest="default_ok", action="store_true",
                    help="com --answer: o que ficar em branco é aceito; se YouTube e banco discordarem, "
                         f"usa o do banco (MusicBrainz); se estiver vazio, vira '{DESCONHECIDO}'. A faixa sai da lista")
+    r.add_argument("--all-fields", dest="todos_campos", action="store_true",
+                   help="com --answer: pergunta todos os campos, não só os que têm problema")
     r.add_argument("-s", "--songs-dir", dest="songs_dir", default="songs", metavar="PASTA",
                    help="pasta das músicas (padrão: ./songs)")
     r.add_argument("-p", "--playlist-dir", dest="playlist_dir", default="playlists", metavar="PASTA",
@@ -220,9 +222,10 @@ def exportar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 CAMPOS = (("title", "Título"), ("artists", "Artistas"), ("album", "Álbum"), ("isrc", "ISRC"))
 AJUDA_RESPOSTA = (
-    "Responda cada campo: Enter = mantém | texto = novo valor | :db = valor do banco (MusicBrainz) | "
+    "Só os campos com problema (⚠) são perguntados (--all-fields pergunta todos).\n"
+    "Responda: Enter = mantém | texto = novo valor | :db = valor do banco (MusicBrainz) | "
     ":yt = valor do YouTube | :- = apagar (álbum/ISRC)\n"
-    "No título também: :ok = está tudo certo | :s = pular | :q = sair. "
+    "Na 1ª pergunta de cada faixa: :ok = está tudo certo | :s = pular | :q = sair. "
     "Vários artistas: separe com |  (o primeiro é o principal)."
 )
 
@@ -262,9 +265,26 @@ def _fontes(resultado: dict) -> tuple[dict, dict]:
     return youtube, banco
 
 
-def _perguntar_isrc(resultado: dict) -> bool:
-    textos = " ".join((resultado.get("pending_reasons") or []) + (resultado.get("observations") or []))
-    return "isrc" in textos.casefold()
+# Cada motivo de conferência aponta para o(s) campo(s) que precisam de atenção.
+_MOTIVO_CAMPOS = (
+    ("título diverge", ("title",)),
+    ("artista diverge", ("artists",)),
+    ("álbum", ("album",)),
+    ("isrc", ("isrc",)),
+    ("deduzidos", ("title", "artists")),
+    ("nenhum artista", ("artists",)),
+    ("artista não confirmado", ("artists",)),
+    ("ausente: title", ("title",)),
+    ("capa", ("cover",)),
+)
+
+
+def campos_com_problema(resultado: dict) -> list[str]:
+    """Quais campos os motivos de conferência apontam (na ordem título, artistas, álbum, ISRC, capa)."""
+    motivos = " | ".join((resultado.get("pending_reasons") or []) + (resultado.get("observations") or []))
+    motivos = motivos.casefold()
+    achados = {campo for chave, campos in _MOTIVO_CAMPOS if chave in motivos for campo in campos}
+    return [c for c in ("title", "artists", "album", "isrc", "cover") if c in achados]
 
 
 def _ler(pergunta: str) -> str:
@@ -309,7 +329,19 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         for motivo in motivos or ["(sem motivo registrado)"]:
             print(f"    • {motivo}")
 
-        campos = [c for c in CAMPOS if c[0] != "isrc" or _perguntar_isrc(resultado)]
+        problemas = campos_com_problema(resultado)
+        nomes = dict(CAMPOS, cover="Capa")
+        if problemas:
+            print("  Campos com problema: " + ", ".join(nomes[c] for c in problemas))
+        if "cover" in problemas and len(problemas) == 1 or problemas == ["album", "cover"]:
+            print("  (a capa vem junto com o álbum: com o álbum certo, o `update` busca a capa)")
+        if args.todos_campos:
+            campos = [c for c in CAMPOS if c[0] != "isrc" or "isrc" in problemas]
+        else:
+            campos = [c for c in CAMPOS if c[0] in problemas] or [CAMPOS[0]]
+            for campo, rotulo in CAMPOS:
+                if campo not in problemas and campo != "isrc" and (campo, rotulo) not in campos:
+                    print(f"  {rotulo}: {_mostrar(atual.get(campo))}  ✓")
         novos: dict = {}
         confirmar_tudo = pular = sair = False
         for campo, rotulo in campos:
@@ -320,14 +352,15 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
             if banco[campo] and not _iguais(campo, banco[campo], valor_atual):
                 opcoes.append(f"banco: {_mostrar(banco[campo])}")
             extra = f"  ({'; '.join(opcoes)})" if opcoes else ""
+            marca = "⚠ " if campo in problemas else ""
             try:
-                resposta = _ler(f"  {rotulo} [{_mostrar(valor_atual)}]{extra}: ")
+                resposta = _ler(f"  {marca}{rotulo} [{_mostrar(valor_atual)}]{extra}: ")
             except (EOFError, KeyboardInterrupt):
                 print()
                 sair = True
                 break
             comando = resposta.casefold()
-            if campo == "title" and comando in (":ok", ":s", ":q", ":pular", ":sair"):
+            if (campo, rotulo) == campos[0] and comando in (":ok", ":s", ":q", ":pular", ":sair"):
                 confirmar_tudo, pular, sair = comando == ":ok", comando in (":s", ":pular"), comando in (":q", ":sair")
                 break
             if not resposta:
@@ -360,7 +393,7 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         if args.default_ok:
             # O que ficou em branco: conflito ou vazio com valor no banco → banco; vazio sem banco → Unknown.
             for campo, _ in CAMPOS:
-                if campo in novos or campo == "isrc":
+                if campo in novos or campo == "isrc" or (campo not in problemas and not args.todos_campos):
                     continue
                 valor_atual = atual.get(campo)
                 conflito = youtube[campo] and not _iguais(campo, youtube[campo], banco[campo])

@@ -79,8 +79,9 @@ class ResponderTests(unittest.TestCase):
             db.close()
 
     def test_so_muda_o_que_foi_digitado_e_branco_fica_na_lista(self):
-        # faixa B: tudo em branco; faixa A: título do banco, artistas mantidos, álbum digitado
-        codigo, saida = self.responder(["", "", "", ":db", "", "Random Access Memories"])
+        # B (deduzida + sem álbum): título, artistas e álbum em branco.
+        # A (título diverge + sem álbum): só título e álbum são perguntados.
+        codigo, saida = self.responder(["", "", "", ":db", "Random Access Memories"])
         self.assertEqual(codigo, 0, saida)
         self.assertIn("título diverge", saida)
         self.assertIn("banco: Get Lucky", saida)
@@ -98,7 +99,7 @@ class ResponderTests(unittest.TestCase):
             self.assertIn("Get Lucky", m3u.read())
 
     def test_trocar_artista_move_o_mp3_e_cria_atalho(self):
-        self.responder([":s", "", "Artista Real | Convidado", ""])
+        self.responder([":s", "", "Artista Real | Convidado", ""], "--all-fields")
         resolucoes, caminhos = self.banco()
         novo = os.path.join(self.songs, "Artista Real", "musica [aaaaaaaaaaa].mp3")
         self.assertTrue(os.path.isfile(novo) and not os.path.islink(novo))
@@ -126,6 +127,22 @@ class ResponderTests(unittest.TestCase):
         self.assertEqual(resolucoes["bbbbbbbbbbb"]["result"]["metadata"]["title"], "Song")
         self.assertEqual(resolucoes["aaaaaaaaaaa"]["result"]["status"], "OBSERVAR")  # :q parou antes
         self.assertIn("Saindo", saida)
+
+    def test_so_pergunta_os_campos_com_problema(self):
+        codigo, saida = self.responder([":s", ":s"])
+        self.assertIn("Campos com problema: Título, Álbum", saida)
+        self.assertIn("Artistas: Daft Punk  ✓", saida)        # A: artista certo, não perguntado
+        self.assertIn("⚠ Título [Get Lucky Remix]", saida)
+        self.assertNotIn("Artistas [Daft Punk]", saida)
+        self.assertIn("Campos com problema: Título, Artistas, Álbum", saida)  # B: deduzida
+
+    def test_mapa_de_motivos_para_campos(self):
+        from comandos.review import campos_com_problema
+        self.assertEqual(campos_com_problema({"observations": ["artista diverge: YouTube='x' / MusicBrainz='y'"]}),
+                         ["artists"])
+        self.assertEqual(campos_com_problema({"pending_reasons": ["ISRC não confirmado pelo MusicBrainz"]}), ["isrc"])
+        self.assertEqual(campos_com_problema({"observations": ["capa do álbum não encontrada; usando a thumbnail"]}),
+                         ["album", "cover"])
 
     def test_default_ok_exige_answer(self):
         with contextlib.redirect_stderr(io.StringIO()):

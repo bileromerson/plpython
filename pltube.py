@@ -531,6 +531,13 @@ def abrir_banco_estado(
             PRIMARY KEY (channel_key, video_key)
         )"""
     )
+    # Conserta faixas que ficaram NAO_VALIDADO embora a identificação esteja salva.
+    conexao.execute(
+        """UPDATE music.music_tracks SET metadata_status = (
+               SELECT r.status FROM music.metadata_resolution r WHERE r.video_key = music_tracks.video_key)
+           WHERE metadata_status = 'NAO_VALIDADO'
+             AND EXISTS (SELECT 1 FROM music.metadata_resolution r WHERE r.video_key = music_tracks.video_key)"""
+    )
     colunas_tracks = {
         linha[1] for linha in conexao.execute("PRAGMA music.table_info(music_tracks)").fetchall()
     }
@@ -807,7 +814,13 @@ def _salvar_metadados_musica(
     if isinstance(artists, str):
         artists = [artists]
     artists = [str(item).strip() for item in artists if str(item).strip()]
-    track_status = str(dados.get("status") or metadata.get("hybrid_status") or "NAO_VALIDADO")
+    track_status = str(dados.get("status") or metadata.get("hybrid_status") or "")
+    if not track_status:
+        # Dados crus do YouTube (antes da identificação) não apagam um status já decidido.
+        existente = conexao.execute(
+            "SELECT status FROM music.metadata_resolution WHERE video_key = ?", (video_key,)
+        ).fetchone()
+        track_status = existente[0] if existente else "NAO_VALIDADO"
     values = (
         video_key,
         str(metadata.get("id") or dados.get("video_id") or ""),
