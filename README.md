@@ -47,8 +47,9 @@ Opções renomeadas (os nomes antigos ainda são aceitos, mas não aparecem na a
 | `-u/--url-column` | `--row` | nome descreve o que é |
 | `--retry` (já embutido em `update`) | `--reprocess` | mais claro |
 | `--wait-on-limit` | `--esperar-bloqueio` | tinha dois nomes |
-| `--hybrid` | `--modelo-hibrido` | curto |
-| `--require-isrc`, `--require-mb-artist` | `--exigir-isrc`, `--exigir-artista-musicbrainz` | agora ativam `--hybrid` sozinhos; antes eram ignorados sem ele |
+| `--no-hybrid` | `--modelo-hibrido` | a identificação agora é ligada por padrão no `plpython.py`; `--no-hybrid` desliga |
+| `--require-isrc`, `--require-mb-artist` | `--exigir-isrc`, `--exigir-artista-musicbrainz` | nomes curtos |
+| `--no-artist-links` | `--artist-links` | os atalhos para artistas secundários agora são o padrão |
 | `--downloads-db` | `--state-file` | um só nome em todos os comandos |
 | `--legacy-db` | `--legacy-state-file` | movido para opções avançadas |
 | `--sheet` | `--arquivo` | consistência |
@@ -63,13 +64,13 @@ python plpython.py download -h            # opções de um comando
 # Baixar todos os CSVs da pasta; músicas e M3Us em pastas próprias
 python plpython.py download -c ./csvs -s /media/Musicas -p ./m3u
 
-# Só duas playlists, linkando colaboradores e acrescentando às M3Us
-python plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links --append
+# Só duas playlists, acrescentando às M3Us
+python plpython.py download csvs/Alone.csv csvs/Rain.csv --append
 
 # CSV cuja URL está na última coluna
 python plpython.py download minha.csv -u -1
 
-# Conferir no MusicBrainz exigindo ISRC (ativa --hybrid automaticamente)
+# Exigir ISRC confirmado no MusicBrainz
 python plpython.py download -c ./csvs --require-isrc
 
 # Atualizar depois de editar CSVs ou após falhas, esperando se o YouTube bloquear
@@ -87,23 +88,65 @@ python plpython.py revert -s songs            # simula
 python plpython.py revert -s songs --apply
 ```
 
-### Prioridades do modelo híbrido (YouTube × MusicBrainz)
+### Identificação de artista, álbum e capa (ligada por padrão)
 
-Com `--hybrid`, cada faixa é comparada campo a campo (título, artistas, álbum, ISRC) entre o YouTube e o MusicBrainz:
+No `plpython.py download`/`update`, cada vídeo passa por um modelo que não depende de acertar de primeira: ele junta várias pistas, dá uma confiança a cada uma e só pede conferência do que ficou incerto. Para desligar e usar só os dados do YouTube, use `--no-hybrid`.
 
-- **Iguais** (tolerando maiúsculas, acentos, "(Official Video)", "feat."): usa a grafia oficial do MusicBrainz e a faixa fica `RESOLVIDO`.
-- **Diferentes:** por padrão vence o **YouTube**; com `--prefer-db` vence o **MusicBrainz**. Nos dois casos a faixa fica `OBSERVAR` com a divergência anotada.
-- **Não encontrada no MusicBrainz:** usa o YouTube e marca `OBSERVAR` ("veio só do YouTube").
-- **`PENDENTE`** fica só para o que realmente falta: sem artista algum, ou um requisito de `--require-isrc`/`--require-mb-artist`.
+**1. Canal do artista ou re-upload?** O canal recebe pontos a favor ou contra:
 
-Para identificar melhor quando o YouTube não dá crédito de artista, o título é limpo (remove "(Official Video)", "[Lyrics]", "HD"…), participações "feat./ft." viram artistas, canais "Artista - Topic" são usados, e títulos "A - B" são testados nas duas ordens no MusicBrainz, ficando a que bater melhor.
+| A favor de ser o artista | Contra (re-upload, gravadora, lyrics…) |
+|---|---|
+| canal "Artista - Topic" (YouTube Music), VEVO, verificado | título traz outro artista ("Fulano - Música" num canal que não é o Fulano) |
+| nome do canal aparece no título como artista | nome típico de curadoria: lyrics, lofi, nightcore, slowed, records, NCS… |
+| canal igual ao artista creditado pelo YouTube | descrição de re-upload ("no copyright infringement", "I do not own"…) |
+| canal já confirmado antes (memória) | canal já confirmado antes como re-upload (memória) |
+
+O nome de um canal de re-upload nunca vira artista.
+
+**2. Quem é o artista e qual é a música?** O título é limpo: sai "(Official Video)", "[Lyrics]", "| NCS - Copyright Free Music", emojis e "No.203"; "ft./feat." vira artista; "(Slowed Version)", "sped up" e "nightcore" ficam marcados no título final. Depois o modelo monta hipóteses com confiança:
+
+| Fonte | Confiança |
+|---|---|
+| descrição "Provided to YouTube by…" (YouTube Music: título, artistas, álbum, data, distribuidora) | 97% |
+| canal Topic | 95% |
+| canal já aprendido como do artista | 92% |
+| crédito oficial do YouTube (campo artista/faixa) ou artista já confirmado na sua biblioteca | 90% |
+| "Artista - Música" quando o canal é o artista | 85–90% |
+| "Artista - Música" em canal de re-upload | 72% |
+| só o nome do canal (canal desconhecido) | 40% |
+
+Vários artistas ("VGR, CG5", "R3HAB x A Touch Of Class", "Alok & JØRD & DJ MP4") são separados; um único "&" é mantido ("Mumford & Sons") e o MusicBrainz corrige se for colaboração.
+
+**3. Confirmação no MusicBrainz.** As melhores hipóteses são buscadas (as duas ordens de "A - B" quando há dúvida). Com uma correspondência, entram a grafia oficial, os créditos completos, o ISRC e os IDs MusicBrainz.
+
+**4. Álbum e capa.** Entre os lançamentos da gravação, é escolhido o mais provável, como o Picard faz: o álbum citado pelo YouTube, se houver; senão oficial, álbum/EP/single antes de coletânea/ao vivo, o mais antigo. Vão para o MP3: álbum, artista do álbum, data, faixa "n/total", disco, distribuidora, ISRC e IDs MusicBrainz. A **capa do álbum** vem do Cover Art Archive (a do release-group, que é igual entre edições) e substitui a thumbnail do vídeo. Sem capa no Cover Art Archive, a thumbnail do vídeo é recortada para ficar quadrada; no YouTube Music ela já é a capa.
+
+**5. Pastas.** O MP3 fica na pasta do **artista principal**, e cada artista secundário recebe um **atalho** para o mesmo arquivo, sem duplicar o áudio (`--no-artist-links` desliga os atalhos). Se um download antigo estiver na pasta errada e o artista for confirmado, ele é movido para a pasta certa, sem sobrescrever nada.
+
+**6. O que vai para conferência no SQL** (o mínimo possível, sem perder precisão):
+
+| Situação | Resultado |
+|---|---|
+| Confirmado no MusicBrainz, com álbum e capa | `RESOLVIDO` (não vai para a lista) |
+| Fonte forte (≥85%: YouTube Music, Topic, crédito oficial, canal/artista aprendido) com álbum | `RESOLVIDO` |
+| YouTube e MusicBrainz divergem | `OBSERVAR`: vence o YouTube, ou o MusicBrainz com `--prefer-db` |
+| Artista/título só deduzidos (<85%) | `OBSERVAR` |
+| Álbum ou capa não encontrados | `OBSERVAR` |
+| Nenhum artista ou falhou `--require-*` | `PENDENTE` |
+
+**A lista diminui sozinha com o tempo.** Toda faixa confirmada, pelo MusicBrainz ou por você (`review --ok`, `metadata --apply`), ensina duas coisas guardadas no SQL:
+- se o canal é do artista ou um re-upload (decidido pela maioria dos votos, para um erro isolado não estragar);
+- quais artistas existem na sua biblioteca.
+
+Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `update`, downloads antigos que estavam na lista têm os metadados consultados de novo no YouTube (sem baixar o áudio), para usar essas pistas.
 
 | Opção | Efeito |
 |---|---|
-| *(padrão)* | divergência → YouTube; marca `OBSERVAR` divergências **e** dados só do YouTube |
-| `--prefer-db` | divergência → MusicBrainz; ainda marca `OBSERVAR` |
-| `--review diff` | marca só divergências; dados só do YouTube passam direto |
-| `--no-review` (`--review none`) | não marca nada, segue direto (as notas ficam guardadas no banco) |
+| *(padrão)* | divergência → YouTube; marca divergências, deduções e faltas |
+| `--prefer-db` | divergência → MusicBrainz; ainda marca |
+| `--review diff` | marca só divergências |
+| `--no-review` | não marca nada (as notas ficam guardadas no banco) |
+| `--no-hybrid` | desliga a identificação (mais rápido, só YouTube) |
 
 **Conferir no terminal** (não precisa de programa de SQL):
 
@@ -129,10 +172,10 @@ SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status 
 Se estiver certo, marque `aplicar=sim` e `confirmar_manual=sim` na planilha e rode `plpython.py metadata --apply`. `update` reconsulta automaticamente as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou.
 
 ```bash
-python plpython.py download -c ./csvs --hybrid
+python plpython.py download -c ./csvs               # identifica tudo (padrão)
 python plpython.py download -c ./csvs --prefer-db
-python plpython.py download -c ./csvs --hybrid --review diff
-python plpython.py download -c ./csvs --hybrid --no-review
+python plpython.py download -c ./csvs --review diff
+python plpython.py download -c ./csvs --no-review
 ```
 
 ## O que já funciona
@@ -243,8 +286,7 @@ O script tenta primeiro recuperar a ordem original do banco SQLite do `pltube` (
 
 A lista abaixo contém apenas itens ainda não disponíveis.
 
-- [ ] **Reorganização após revisão:** mover o MP3 confirmado para a pasta do artista principal e atualizar links de colaboradores, se essa opção for escolhida. O aplicador atual preserva o caminho do arquivo.
-- [ ] **Capa do lançamento:** baixar a imagem frontal confirmada do Cover Art Archive, incorporá-la ao MP3 e preservar uma única arte escolhida; por enquanto a URL é apenas uma sugestão.
+- [ ] **Reorganização após correção manual:** o `download`/`update` já movem o MP3 para a pasta do artista principal quando o artista é confirmado; o `metadata --apply` ainda preserva o caminho do arquivo quando você troca o artista na planilha.
 - [ ] **Catálogo global da biblioteca:** indexar todos os arquivos locais, seus caminhos, fontes, tags e relações com playlists; permitir filtros como `unknown` e `*` para localizar pendências ou revisar o catálogo completo.
 - [ ] **Backup portátil de metadados:** criar e restaurar um catálogo SQLite com URLs, metadados e referências dos arquivos, sem exigir que os MP3s estejam conectados para consultar o catálogo. Esse backup não conterá o áudio.
 - [ ] **Transferência Spotify → YouTube:** pesquisar correspondências de faixas e gerar uma lista para revisão. O visualizador atual não faz essa conversão.

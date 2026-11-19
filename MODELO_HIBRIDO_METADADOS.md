@@ -1,5 +1,7 @@
 # Especificação: modelo híbrido de metadados
 
+> **Atualização:** o modelo atual (canal × artista, confiança por fonte, álbum, capa do Cover Art Archive, memória de canais e conferência mínima) está descrito no README, em "Identificação de artista, álbum e capa", e implementado em `resolver_com_prioridade` (`resolvedor_metadados.py`). Este documento descreve a primeira versão.
+
 **Estado:** o downloader e o resolvedor funcionam por `--modelo-hibrido`. A planilha editável e o aplicador seguro estão disponíveis; reorganizar os arquivos após a revisão e incorporar capas continuam futuros.
 
 ## Objetivo

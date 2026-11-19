@@ -17,7 +17,7 @@ RESUMO = "relê os CSVs, refaz falhas e pendências sem baixar de novo o que já
 OPCOES = "as mesmas do download, exceto --retry"
 EXEMPLOS = """\
   plpython.py update -c ./csvs
-  plpython.py update -c ./csvs --hybrid --wait-on-limit
+  plpython.py update -c ./csvs --wait-on-limit
   plpython.py update csvs/Alone.csv --no-review"""
 
 

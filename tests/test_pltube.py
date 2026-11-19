@@ -184,9 +184,11 @@ class PltubeTests(unittest.TestCase):
                 writer.writerow(["abc123", "Canção provisória", "https://youtube.com/watch?v=abc123"])
 
             songs, playlists = os.path.join(temp, "songs"), os.path.join(temp, "playlists")
+            # Re-upload: canal qualquer, artista só no título -> fica para conferência.
             origem = {
-                "title": "Canção provisória", "artists": ["Artista do vídeo"],
-                "album": "Álbum do vídeo", "duration": 120, "id": "abc123",
+                "title": "Artista do vídeo - Canção provisória", "artists": [],
+                "uploader": "Canal Qualquer", "album": "Álbum do vídeo",
+                "duration": 120, "id": "abc123",
             }
             class BaseSemResultados:
                 def search_by_isrc(self, isrc, limit=10):
@@ -260,7 +262,7 @@ class PltubeTests(unittest.TestCase):
                         rows = list(csv.DictReader(handle))
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["video_id"], "abc123")
-                    self.assertIn("usando título/artista do YouTube", rows[0]["observacoes"])
+                    self.assertIn("deduzidos do título do vídeo", rows[0]["observacoes"])
                     self.assertIn("lista", rows[0]["playlists"])
 
                     resultado_confirmado = {

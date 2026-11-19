@@ -8,14 +8,17 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from resolvedor_metadados import (
-    MusicBrainzClient, normalize_isrc, resolver_com_prioridade, resolver_metadados,
+    LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
+    ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade, resolver_metadados,
 )
 
 try:
@@ -40,6 +43,9 @@ REVISAR = "all"  # all | diff | none
 STATUS_REVISAO = ("PENDENTE", "OBSERVAR")
 MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
 RESOLVER_CACHE: dict[str, Any] = {}
+ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
+CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
+FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music"}
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
 ESPERA_MAXIMA_SEGUNDOS = 600
@@ -423,6 +429,17 @@ def abrir_banco_estado(
         );
         """
     )
+    conexao.execute(
+        """CREATE TABLE IF NOT EXISTS music.channel_votes (
+            channel_key TEXT NOT NULL,
+            video_key TEXT NOT NULL,
+            channel_name TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL,
+            artist TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (channel_key, video_key)
+        )"""
+    )
     colunas_tracks = {
         linha[1] for linha in conexao.execute("PRAGMA music.table_info(music_tracks)").fetchall()
     }
@@ -787,11 +804,100 @@ def meta_do_resultado_hibrido(resultado: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def chave_canal(dados: dict[str, Any]) -> str:
+    """Identificador estável do canal: o ID do YouTube ou, sem ele, o nome limpo."""
+    if dados.get("channel_id"):
+        return "youtube:" + str(dados["channel_id"])
+    nome = _nome_canal_limpo(str(dados.get("uploader") or ""))
+    return ("nome:" + nome.casefold()) if nome else ""
+
+
+def perfil_canal(conexao: sqlite3.Connection | None, chave: str) -> dict[str, Any] | None:
+    """O que já se sabe do canal: maioria dos votos entre "artista" e "curador"."""
+    if conexao is None or not chave:
+        return None
+    linhas = conexao.execute(
+        "SELECT kind, artist, COUNT(*) AS n FROM music.channel_votes WHERE channel_key = ? "
+        "GROUP BY kind, artist ORDER BY n DESC",
+        (chave,),
+    ).fetchall()
+    if not linhas:
+        return None
+    votos = {"artista": 0, "curador": 0}
+    artistas: dict[str, int] = {}
+    for linha in linhas:
+        votos[linha["kind"]] = votos.get(linha["kind"], 0) + linha["n"]
+        if linha["kind"] == "artista" and linha["artist"]:
+            artistas[linha["artist"]] = artistas.get(linha["artist"], 0) + linha["n"]
+    if votos["artista"] == votos["curador"]:
+        return None
+    tipo = "artista" if votos["artista"] > votos["curador"] else "curador"
+    principal = max(artistas, key=artistas.get) if artistas else ""
+    return {"kind": tipo, "artists": [principal] if principal and tipo == "artista" else [], "votos": votos}
+
+
+def aprender_canal(conexao: sqlite3.Connection | None, video_key: str, resultado: dict[str, Any]) -> None:
+    """Quando o artista está confirmado, registra se o canal é do artista ou um re-upload.
+
+    Um voto por vídeo; a decisão é pela maioria, então um erro isolado não estraga
+    o que foi aprendido.
+    """
+    if conexao is None:
+        return
+    metadata = resultado.get("metadata") or {}
+    origem = resultado.get("source_youtube") or {}
+    if (resultado.get("provenance") or {}).get("artists") not in FONTES_ARTISTA_CONFIRMADO:
+        return
+    uploader = str(metadata.get("uploader") or origem.get("uploader") or "")
+    if not uploader or re.search(r"-\s*topic\s*$", uploader, re.I):
+        return
+    nome = _nome_canal_limpo(uploader)
+    chave = chave_canal({"channel_id": metadata.get("channel_id") or origem.get("channel_id"), "uploader": uploader})
+    artistas = [str(a) for a in metadata.get("artists") or []]
+    if not nome or not chave or not artistas:
+        return
+    artista = next((a for a in artistas if _mesmo_nome(nome, a)), "")
+    conexao.execute(
+        """INSERT INTO music.channel_votes (channel_key, video_key, channel_name, kind, artist)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(channel_key, video_key) DO UPDATE SET
+           kind=excluded.kind, artist=excluded.artist, channel_name=excluded.channel_name,
+           updated_at=CURRENT_TIMESTAMP""",
+        (chave, video_key, nome, "artista" if artista else "curador", artista),
+    )
+
+
+def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str]:
+    """Artistas de faixas já resolvidas: ajudam a saber qual lado de "A - B" é o artista."""
+    if conexao is None:
+        return []
+    nomes: dict[str, None] = {}
+    for (artistas_json,) in conexao.execute(
+        "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'RESOLVIDO'"
+    ).fetchall():
+        try:
+            for nome in json.loads(artistas_json or "[]"):
+                if str(nome).strip():
+                    nomes[str(nome).strip()] = None
+        except (TypeError, ValueError):
+            continue
+    return list(nomes)
+
+
+def artista_confiavel(resultado: dict[str, Any] | None) -> bool:
+    if not resultado or resultado.get("status") == "PENDENTE":
+        return False
+    if (resultado.get("provenance") or {}).get("artists") in FONTES_ARTISTA_CONFIRMADO:
+        return True
+    return float((resultado.get("scores") or {}).get("artists") or 0) >= LIMIAR_CONFIANCA
+
+
 def resolver_meta_hibrido(
     meta: dict[str, Any],
     *,
     dados_locais: dict[str, Any] | None = None,
     sem_dados_youtube: bool = False,
+    estado: sqlite3.Connection | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     campos_obrigatorios = ["title", "artists", "album"]
     if EXIGIR_ISRC:
@@ -803,6 +909,8 @@ def resolver_meta_hibrido(
         musicbrainz_client=MUSICBRAINZ_CLIENT,
         preferir=PREFERIR,
         revisar=REVISAR,
+        canal_conhecido=perfil_canal(estado, chave_canal(meta)),
+        artistas_conhecidos=ARTISTAS_CONHECIDOS,
         exigir_isrc=EXIGIR_ISRC,
         exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
         dados_locais=dados_locais,
@@ -811,51 +919,94 @@ def resolver_meta_hibrido(
 
 
 def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
-    """Grava tags canônicas e um marcador ID3 explícito de metadados pendentes."""
+    """Grava no MP3 as tags completas (faixa, álbum, IDs MusicBrainz), a capa do
+    álbum e um marcador de status. Funciona como o Picard: TPE1 com vários
+    artistas, TPE2 artista do álbum, TRCK "n/total", UFID da gravação."""
     try:
-        from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TIT2, TPE1, TSRC, TXXX
-
+        from mutagen.id3 import (
+            APIC, ID3, ID3NoHeaderError, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TPUB, TRCK, TSRC, TXXX, UFID,
+        )
+    except ImportError as exc:
+        registrar_erro(audio_path, f"mutagen não instalado; tags não gravadas: {exc}")
+        return False
+    try:
         try:
             tags = ID3(audio_path)
         except ID3NoHeaderError:
             tags = ID3()
         metadata = resultado.get("metadata") or {}
-        for frame_id in ("TIT2", "TPE1", "TALB", "TSRC"):
-            tags.delall(frame_id)
-        if metadata.get("title"):
-            tags.add(TIT2(encoding=3, text=[str(metadata["title"])]))
-        artists = metadata.get("artists") or []
-        if isinstance(artists, str):
-            artists = [artists]
-        if artists:
-            tags.add(TPE1(encoding=3, text=[str(item) for item in artists]))
-        if metadata.get("album"):
-            tags.add(TALB(encoding=3, text=[str(metadata["album"])]))
-        if metadata.get("isrc"):
-            tags.add(TSRC(encoding=3, text=[str(metadata["isrc"])]))
+        artistas = metadata.get("artists") or []
+        if isinstance(artistas, str):
+            artistas = [artistas]
+        artistas = [str(a) for a in artistas if str(a).strip()]
+        album_artistas = [str(a) for a in metadata.get("album_artists") or [] if str(a).strip()]
 
-        valores = {
-            "PLTUBE_METADATA_STATUS": str(resultado.get("status") or "PENDENTE"),
-            "PLTUBE_METADATA_NOTE": (
-                "Metadados provisórios; podem estar incorretos. Consulte metadados_pendentes.csv."
-                if resultado.get("status") == "PENDENTE"
-                else "Confira título/artista; veja observacoes em metadados_pendentes.csv."
-                if resultado.get("status") == "OBSERVAR"
-                else "Metadados confirmados pelo modelo híbrido."
-            ),
-            "PLTUBE_METADATA_PROVENANCE": json.dumps(
-                resultado.get("provenance") or {}, ensure_ascii=False
-            ),
-            "PLTUBE_METADATA_CONFIDENCE": json.dumps(
-                resultado.get("confidence") or {}, ensure_ascii=False
-            ),
-            "PLTUBE_METADATA_REVIEW": " | ".join(
-                (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
-            ),
-        }
-        for desc, value in valores.items():
+        def texto(frame_cls, frame_id: str, valor: Any) -> None:
+            tags.delall(frame_id)
+            valores = valor if isinstance(valor, list) else [valor]
+            valores = [str(v) for v in valores if str(v or "").strip()]
+            if valores:
+                tags.add(frame_cls(encoding=3, text=valores))
+
+        def extra(desc: str, valor: Any) -> None:
             tags.delall(f"TXXX:{desc}")
-            tags.add(TXXX(encoding=3, desc=desc, text=[value]))
+            valores = valor if isinstance(valor, list) else [valor]
+            valores = [str(v) for v in valores if str(v or "").strip()]
+            if valores:
+                tags.add(TXXX(encoding=3, desc=desc, text=valores))
+
+        texto(TIT2, "TIT2", metadata.get("title"))
+        texto(TPE1, "TPE1", artistas)
+        texto(TALB, "TALB", metadata.get("album"))
+        texto(TPE2, "TPE2", " & ".join(album_artistas) if album_artistas else (artistas[0] if artistas and metadata.get("album") else ""))
+        texto(TDRC, "TDRC", metadata.get("date"))
+        numero, total = int(metadata.get("track_number") or 0), int(metadata.get("track_total") or 0)
+        texto(TRCK, "TRCK", (f"{numero}/{total}" if total else str(numero)) if numero else "")
+        disco, discos = int(metadata.get("disc_number") or 0), int(metadata.get("disc_total") or 0)
+        texto(TPOS, "TPOS", (f"{disco}/{discos}" if discos else str(disco)) if disco else "")
+        texto(TPUB, "TPUB", metadata.get("label"))
+        texto(TSRC, "TSRC", metadata.get("isrc"))
+        extra("ARTISTS", artistas if len(artistas) > 1 else "")
+        extra("MusicBrainz Album Id", metadata.get("musicbrainz_release_id"))
+        extra("MusicBrainz Release Group Id", metadata.get("musicbrainz_release_group_id"))
+        extra("MusicBrainz Artist Id", list(metadata.get("musicbrainz_artist_ids") or []))
+        tags.delall("UFID:http://musicbrainz.org")
+        if metadata.get("musicbrainz_recording_id"):
+            tags.add(UFID(owner="http://musicbrainz.org", data=str(metadata["musicbrainz_recording_id"]).encode()))
+
+        # Capa: a do álbum (Cover Art Archive) substitui a thumbnail do vídeo;
+        # sem ela, a thumbnail é recortada para ficar quadrada. O marcador evita
+        # baixar/recortar de novo a cada execução.
+        marcador = str(tags.get("TXXX:PLTUBE_COVER") or "")
+        fonte = metadata.get("cover_source") or ""
+        url = str(metadata.get("cover_url") or "")
+        if fonte == "cover_art_archive" and url and marcador != url:
+            imagem = _baixar_capa(url)
+            if imagem:
+                tags.delall("APIC")
+                mime = "image/png" if imagem[:4] == b"\x89PNG" else "image/jpeg"
+                tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=imagem))
+                extra("PLTUBE_COVER", url)
+        elif fonte in {"youtube_thumbnail", "youtube_music_thumbnail"} and not marcador:
+            atuais = tags.getall("APIC")
+            if atuais:
+                quadrada = recortar_quadrado(atuais[0].data)
+                if quadrada:
+                    tags.delall("APIC")
+                    tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=quadrada))
+                    extra("PLTUBE_COVER", "thumbnail-recortada")
+
+        status = str(resultado.get("status") or "PENDENTE")
+        extra("PLTUBE_METADATA_STATUS", status)
+        extra("PLTUBE_METADATA_NOTE", {
+            "PENDENTE": "Metadados provisórios; podem estar incorretos. Consulte: plpython.py review",
+            "OBSERVAR": "Confira título/artista/álbum: plpython.py review",
+        }.get(status, "Metadados conferidos pelo plpython."))
+        extra("PLTUBE_METADATA_REVIEW", " | ".join(
+            (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
+        ))
+        for antigo in ("PLTUBE_METADATA_PROVENANCE", "PLTUBE_METADATA_CONFIDENCE"):
+            tags.delall(f"TXXX:{antigo}")
         tags.save(audio_path)
         return True
     except Exception as exc:
@@ -1062,15 +1213,25 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
         )
         if not artistas and not MODELO_HIBRIDO:
             raise RuntimeError("O YouTube não informou o artista deste vídeo.")
+        descricao = str(info.get("description") or "")
         return {
             "title": info.get("title") or info.get("id") or "musica-sem-titulo",
             "artists": artistas,
             "artist": artistas[0] if artistas else "",
+            "fonte_artistas": "youtube",
+            "track": info.get("track") or "",
             "duration": info.get("duration") or 0,
             "id": str(info.get("id") or hashlib.sha1(url.encode("utf-8")).hexdigest()[:11]),
             "album": info.get("album") or info.get("release") or "",
             "isrc": info.get("isrc") or info.get("isrcs") or "",
             "uploader": info.get("uploader") or info.get("channel") or "",
+            "channel_id": info.get("channel_id") or "",
+            "channel_is_verified": bool(info.get("channel_is_verified")),
+            "release_date": info.get("release_date") or "",
+            "release_year": info.get("release_year") or "",
+            # Só o que importa da descrição; o texto inteiro não vai para o banco.
+            "youtube_music": ler_descricao_youtube_music(descricao),
+            "descricao_reupload": bool(_DESCRICAO_REUPLOAD.search(descricao)),
             "thumbnail": info.get("thumbnail") or "",
             "thumbnails": info.get("thumbnails") or [],
         }
@@ -1116,6 +1277,79 @@ def criar_link_artista(arquivo_original: str, artista: str) -> bool:
         except OSError as hardlink_exc:
             registrar_erro(arquivo_original, f"Falha criando link: {exc}; {hardlink_exc}")
             return False
+
+
+def mover_para_artista_principal(path: str, artistas: list[str]) -> str:
+    """Move um MP3 já baixado para a pasta do artista principal confirmado.
+
+    Só mexe em arquivos que estão diretamente em <songs>/<pasta>/; nunca
+    sobrescreve nada. Atalhos antigos que ficaram quebrados são removidos e os
+    novos são criados depois, pelo fluxo normal.
+    """
+    if not path or not artistas or not os.path.isfile(path) or os.path.islink(path):
+        return path
+    pasta = os.path.dirname(os.path.abspath(path))
+    if os.path.realpath(os.path.dirname(pasta)) != os.path.realpath(SONGS_DIR):
+        return path
+    destino_nome = nome_seguro(artistas[0], "Artista Desconhecido")
+    atual = os.path.basename(pasta)
+    if atual == destino_nome or destino_nome.casefold() in {"_pendentes", "_observar", "_library"}:
+        return path
+    nova_pasta = os.path.join(SONGS_DIR, destino_nome)
+    novo = os.path.join(nova_pasta, os.path.basename(path))
+    if os.path.lexists(novo):
+        if os.path.islink(novo) and os.path.realpath(novo) == os.path.realpath(path):
+            os.unlink(novo)  # era só o atalho de colaborador; o arquivo real vai para lá
+        else:
+            return path
+    try:
+        os.makedirs(nova_pasta, exist_ok=True)
+        shutil.move(path, novo)
+    except OSError as exc:
+        registrar_erro(path, f"Não foi possível mover para a pasta do artista principal: {exc}")
+        return path
+    nome_arquivo = os.path.basename(novo)
+    for entrada in os.scandir(SONGS_DIR):
+        candidato = os.path.join(entrada.path, nome_arquivo)
+        if entrada.is_dir(follow_symlinks=False) and os.path.islink(candidato) and not os.path.exists(candidato):
+            os.unlink(candidato)
+    try:
+        os.rmdir(pasta)  # só remove se ficou vazia
+    except OSError:
+        pass
+    print(f"Movido para a pasta do artista principal: {os.path.relpath(novo, SONGS_DIR)}")
+    return novo
+
+
+def _baixar_capa(url: str) -> bytes | None:
+    if url in CAPAS_BAIXADAS:
+        return CAPAS_BAIXADAS[url]
+    dados = None
+    cliente = MUSICBRAINZ_CLIENT or MusicBrainzClient()
+    try:
+        dados = cliente.download_image(url)
+    except Exception as exc:
+        registrar_erro(url, f"Não foi possível baixar a capa do álbum: {exc}")
+    CAPAS_BAIXADAS[url] = dados
+    return dados
+
+
+def recortar_quadrado(imagem: bytes) -> bytes | None:
+    """Recorta o centro da thumbnail 16:9 do YouTube para ficar quadrada como uma capa."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not imagem:
+        return None
+    try:
+        processo = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", "pipe:0",
+             "-vf", "crop='if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'",
+             "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "2", "pipe:1"],
+            input=imagem, capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    saida = processo.stdout
+    return saida if processo.returncode == 0 and saida[:3] == b"\xff\xd8\xff" else None
 
 
 def baixar_musica(
@@ -1269,6 +1503,7 @@ def meta_do_registro(registro: dict[str, Any]) -> dict[str, Any]:
         "artist": artistas[0],
         "duration": registro.get("duration") or 0,
         "id": registro.get("video_id") or "",
+        "fonte_artistas": "cache",
     }
 
 
@@ -1380,7 +1615,31 @@ def processar_csv(
                                 dados_locais = metadados_de_arquivo_local(
                                     music_path, video_id
                                 ).get("local_metadata")
-                                print(f"Já está baixada; reutilizando sem acessar o YouTube: {url}")
+                                resolucao_salva = (
+                                    carregar_resolucao(estado, video_key)
+                                    if MODELO_HIBRIDO and estado is not None else None
+                                )
+                                precisa_youtube = MODELO_HIBRIDO and reprocess and not (
+                                    resolucao_salva and (
+                                        resolucao_salva["result"].get("status") not in STATUS_REVISAO
+                                        or (resolucao_salva["result"].get("manual_review") or {}).get("fields")
+                                        or (resolucao_salva["result"].get("source_youtube") or {}).get("uploader")
+                                    )
+                                )
+                                if precisa_youtube:
+                                    # Downloads antigos não guardaram canal/descrição; para
+                                    # identificar melhor, consulta só os metadados (sem baixar).
+                                    print(f"Consultando metadados para identificar melhor: {url}")
+                                    try:
+                                        novo = extrair_metadados(url, csv_file)
+                                    except BloqueioTemporarioYouTube:
+                                        print("Interrompendo esta playlist para evitar novas requisições durante o bloqueio.")
+                                        bloqueado = True
+                                        break
+                                    if novo:
+                                        meta = novo
+                                else:
+                                    print(f"Já está baixada; reutilizando sem acessar o YouTube: {url}")
                             elif video_id and indice_local and os.path.isfile(indice_local.get(video_id, "")):
                                 music_path = indice_local[video_id]
                                 meta = metadados_de_arquivo_local(
@@ -1449,8 +1708,14 @@ def processar_csv(
                                         meta,
                                         dados_locais=dados_locais,
                                         sem_dados_youtube=sem_dados_youtube,
+                                        estado=estado,
                                     )
+                                    if hybrid_result.get("status") == "RESOLVIDO":
+                                        for nome in meta.get("artists") or []:
+                                            if nome not in ARTISTAS_CONHECIDOS:
+                                                ARTISTAS_CONHECIDOS.append(nome)
                                     if estado is not None:
+                                        aprender_canal(estado, video_key, hybrid_result)
                                         salvar_resolucao(estado, video_key, hybrid_result)
                                 if estado is not None and hybrid_result:
                                     _salvar_metadados_musica(estado, video_key, hybrid_result)
@@ -1459,6 +1724,10 @@ def processar_csv(
                                 _salvar_metadados_musica(estado, video_key, meta)
 
                             if meta and music_path and hybrid_result:
+                                if artista_confiavel(hybrid_result):
+                                    music_path = mover_para_artista_principal(
+                                        music_path, meta.get("artists") or []
+                                    )
                                 aplicar_tags_hibridas(music_path, hybrid_result)
 
                             if (
@@ -1682,6 +1951,9 @@ def executar(args: argparse.Namespace) -> int:
         print(f"Não foi possível abrir o banco de progresso {state_path}: {exc}")
         return 1
 
+    # Memória da biblioteca: artistas já confirmados ajudam a identificar os próximos.
+    ARTISTAS_CONHECIDOS[:] = carregar_artistas_conhecidos(estado)
+    CAPAS_BAIXADAS.clear()
     try:
         indice_local = indexar_musicas_locais()
         for csv_file in csvs:

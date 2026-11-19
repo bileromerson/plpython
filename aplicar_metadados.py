@@ -215,6 +215,8 @@ def _aplicar_plano(conexao, plano: dict[str, Any], playlist_dir: str) -> None:
         pltube._salvar_metadados_musica(
             conexao, plano["video_key"], plano["result"]
         )
+        # Correção manual também ensina se o canal é do artista ou um re-upload.
+        pltube.aprender_canal(conexao, plano["video_key"], plano["result"])
         conexao.commit()
     except Exception:
         conexao.rollback()

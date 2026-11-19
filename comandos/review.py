@@ -149,6 +149,10 @@ def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool)
         resultado["manual_review"] = {"fields": [], "confirmed": True, "via": "review --ok"}
         for campo in ("title", "artists"):
             (resultado.setdefault("confidence", {}))[campo] = "confirmada_manual"
+            (resultado.setdefault("provenance", {}))[campo] = "manual"
+            (resultado.setdefault("scores", {}))[campo] = 1.0
+        resultado["observations"] = []
+        pltube.aprender_canal(conexao, linha["video_key"], resultado)
         pltube.salvar_resolucao(conexao, linha["video_key"], resultado, salvo.get("audio_path") or "")
         caminho = salvo.get("audio_path") or ""
         if caminho and os.path.isfile(caminho):

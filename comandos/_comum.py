@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import textwrap
 
 
 def novo_parser(prog: str, descricao: str, exemplos: str) -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         prog=prog,
-        description=descricao,
+        description=textwrap.fill(descricao, 79),
         epilog="exemplos:\n" + exemplos,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

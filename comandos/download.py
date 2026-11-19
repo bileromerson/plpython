@@ -14,17 +14,17 @@ from comandos._comum import novo_parser, oculto, opcoes_bancos, opcoes_pastas, t
 NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
-OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --artist-links\n"
-          "--wait-on-limit  --retry  --hybrid  --prefer-db  --review  --no-review\n"
+OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --no-artist-links\n"
+          "--wait-on-limit  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
           "--require-isrc  --require-mb-artist")
 EXEMPLOS = """\
-  plpython.py download -c ./csvs
+  plpython.py download -c ./csvs                      # identifica artista, álbum e capa
   plpython.py download -c ./csvs/Alone.csv            # só uma playlist
-  plpython.py download csvs/Alone.csv csvs/Rain.csv --artist-links --append
+  plpython.py download csvs/Alone.csv csvs/Rain.csv --append
   plpython.py download -c ./csvs -s Musicas -p ./m3u
-  plpython.py download -c ./csvs --hybrid --require-isrc
   plpython.py download -c ./csvs --prefer-db          # MusicBrainz vence divergências
-  plpython.py download -c ./csvs --hybrid --no-review"""
+  plpython.py download -c ./csvs --review diff        # só pede conferência de divergências
+  plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube"""
 
 
 def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
@@ -41,8 +41,10 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     oculto(p, "--lista", dest="csvs_extra", action="append")
     p.add_argument("-a", "--append", action="store_true",
                    help="acrescenta à M3U existente em vez de reescrevê-la")
-    p.add_argument("--artist-links", action="store_true",
-                   help="cria links do MP3 nas pastas dos artistas colaboradores")
+    p.add_argument("--no-artist-links", dest="artist_links", action="store_false", default=True,
+                   help="não cria atalhos nas pastas dos artistas secundários "
+                        "(padrão: o MP3 fica no artista principal e os outros recebem um atalho)")
+    oculto(p, "--artist-links", dest="artist_links", action="store_true")
     p.add_argument("--wait-on-limit", dest="esperar_bloqueio", action="store_true",
                    help="espera e tenta de novo se o YouTube bloquear (30s → 10min, até 6x)")
     oculto(p, "--esperar-bloqueio", dest="esperar_bloqueio", action="store_true")
@@ -53,20 +55,22 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("-l", "--log-file", dest="log_file", metavar="ARQ",
                    help="arquivo de log de erros (padrão: ./Logs.txt)")
 
-    h = p.add_argument_group("metadados MusicBrainz (modelo híbrido)")
-    h.add_argument("--hybrid", dest="modelo_hibrido", action="store_true",
-                   help="confere título/artistas no MusicBrainz e gera metadados_pendentes.csv")
+    h = p.add_argument_group("identificação de artista, álbum e capa (ligada por padrão)")
+    h.add_argument("--no-hybrid", dest="modelo_hibrido", action="store_false", default=True,
+                   help="desliga a identificação: usa só os dados do YouTube, sem MusicBrainz, "
+                        "capa do álbum nem lista de conferência (mais rápido)")
+    oculto(p, "--hybrid", dest="modelo_hibrido", action="store_true")
     h.add_argument("--require-isrc", dest="exigir_isrc", action="store_true",
-                   help="deixa pendente faixa sem ISRC confirmado (ativa --hybrid)")
+                   help="deixa pendente faixa sem ISRC confirmado")
     h.add_argument("--require-mb-artist", dest="exigir_artista_musicbrainz", action="store_true",
-                   help="exige artista confirmado pelo MusicBrainz (ativa --hybrid)")
+                   help="exige artista confirmado pelo MusicBrainz")
     h.add_argument("--prefer-db", dest="preferir", action="store_const", const="musicbrainz",
                    default="youtube",
                    help="se YouTube e MusicBrainz divergirem, usa o MusicBrainz (padrão: YouTube); "
-                        "a divergência continua indo para a lista (ativa --hybrid)")
+                        "a divergência continua indo para a lista")
     h.add_argument("--review", dest="revisar", choices=["all", "diff", "none"], default="all",
                    help="o que marcar como OBSERVAR: all = divergências + dados só do YouTube (padrão); "
-                        "diff = só divergências; none = não marca nada (ativa --hybrid)")
+                        "diff = só divergências; none = não marca nada")
     h.add_argument("--no-review", dest="revisar", action="store_const", const="none",
                    help="atalho para --review none: segue direto sem lista de conferência")
     oculto(p, "--modelo-hibrido", dest="modelo_hibrido", action="store_true")
@@ -79,7 +83,10 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
 
 
 def criar_parser(prog: str = "plpython.py download") -> argparse.ArgumentParser:
-    p = novo_parser(prog, "Baixa o áudio dos vídeos listados nos CSVs e gera uma M3U por CSV.", EXEMPLOS)
+    p = novo_parser(prog, "Baixa o áudio dos vídeos dos CSVs, identifica artista/álbum/capa e gera "
+                          "uma M3U por CSV. O MP3 fica na pasta do artista principal; os demais "
+                          "artistas recebem um atalho. O que não der para confirmar vai para "
+                          "conferência (plpython.py review).", EXEMPLOS)
     adicionar_opcoes(p, update=False)
     return traduzir_ajuda(p)
 
@@ -101,8 +108,7 @@ def executar(args: argparse.Namespace, *, update: bool = False) -> int:
         or args.preferir != "youtube" or args.revisar != "all"
     )
     if usa_opcao_hibrida and not args.modelo_hibrido:
-        print("Opções de metadados informadas: ativando o modo --hybrid.")
-        args.modelo_hibrido = True
+        print("Aviso: --no-hybrid ignora --prefer-db/--review/--require-*.")
     args.state_file = args.downloads_db
     return pltube.executar(args)
 
