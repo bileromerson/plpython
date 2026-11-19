@@ -41,7 +41,8 @@ O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é 
 | `-a` | `--answer` (review) / `--append` (download, update) | |
 | `-y` | `--default-ok` (review) / `--apply` (metadata, revert, sync) | |
 | `-A` | `--all-fields` | review |
-| `-x` | `--skip` | review |
+| `-x` | `--skip` | review, download, update (com `--ask`) |
+| `-i` | `--ask` | download, update |
 | `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review |
 | `-f` | `--sheet` | metadata |
 | `-n` | `--name` | playlist |
@@ -86,6 +87,7 @@ pasta onde você rodou/
 | `metadata` | aplica as correções feitas na planilha `metadados_pendentes.csv` (simula sem `--apply`) |
 | `spotify` | lê suas playlists do Spotify e salva as músicas em `spotify.csv` (não baixa nada) |
 | `sync` | compara o `spotify.csv` com o que já foi baixado, acerta as M3Us e lista o que falta (simula sem `-y`) |
+| `artists` | banco de artistas: nome certo, variações e correção das músicas com o nome errado (simula sem `-y`) |
 | `revert` | converte uma biblioteca no layout antigo `songs/_library` para pastas por artista (simula sem `--apply`) |
 
 ```bash
@@ -105,6 +107,8 @@ python plpython.py download -c csvs --no-hybrid           # rápido: só dados d
 python plpython.py download -c csvs --wait-on-limit --sleep 10-20
 python plpython.py download -c meu.csv -u -1              # URL na última coluna do CSV
 python plpython.py update -c csvs -v
+python plpython.py download -c csvs --ask                 # no fim, pergunta o que não deu para confirmar
+python plpython.py download -c csvs -i -x album           # idem, sem perguntar o álbum
 
 # conferência
 python plpython.py review -d
@@ -116,6 +120,11 @@ python plpython.py metadata --apply
 # Spotify
 python plpython.py spotify -L                             # suas playlists + curtidas → spotify.csv
 python plpython.py sync -y                                # acerta as M3Us e salva nao_baixadas.csv
+
+# artistas
+python plpython.py artists                                # lista artistas e variações
+python plpython.py artists alias "AC/DC" "ACDC"           # ACDC passa a ser AC/DC
+python plpython.py artists fix -y                         # corrige as músicas com o nome errado
 
 # outros
 python plpython.py revert -s songs --apply
@@ -252,7 +261,33 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 | `--no-review` | não marca nada (as notas ficam guardadas no banco) |
 | `--no-hybrid` | desliga a identificação (mais rápido, só YouTube) |
 
+## Banco de artistas: `artists`
+
+`sql/artistas.sqlite3` guarda o **nome certo** de cada artista e as **variações** com que ele aparece por aí ("Henrique e Juliano", "ACDC", "ImagineDragons"). É um arquivo separado, então dá para copiá-lo para outra biblioteca (`--artists-db` escolhe outro).
+
+- **Enche sozinho:** na primeira vez ele traz os artistas das faixas já confirmadas, escolhendo a grafia mais usada. Depois, o `download` e o `review` colocam aqui todo artista confirmado ou digitado por você.
+- **Ajuda a identificar:** os nomes e as variações são procurados em cada pedaço do título do vídeo, mesmo para artistas que ainda não têm música no banco de músicas.
+- **Corrige a grafia:** uma variação nunca fica no MP3. Ao identificar, ela vira o nome certo, e o `artists fix -y` faz o mesmo nas músicas já baixadas (tags, banco, pasta e M3U).
+
+Nomes que só mudam em maiúscula, espaço ou pontuação ("WHSPRS"/"Whsprs", "TheFatRat"/"The Fat Rat") já são o mesmo artista. Para escolher a grafia, use `rename`.
+
+```bash
+python plpython.py artists                                   # lista: nome, faixas e variações
+python plpython.py artists list henrique                     # procura
+python plpython.py artists add "Henrique & Juliano" -a "Henrique e Juliano"
+python plpython.py artists alias "AC/DC" "ACDC" "AC-DC"      # variações (junta dois artistas, se for o caso)
+python plpython.py artists rename "WHSPRS" "Whsprs"          # troca o nome certo
+python plpython.py artists remove "AC-DC"                    # tira a variação (ou o artista)
+python plpython.py artists similar                           # nomes parecidos que podem ser o mesmo
+python plpython.py artists fix                               # o que mudaria nas músicas
+python plpython.py artists fix -y                            # corrige
+```
+
 ## Conferir e corrigir
+
+### Perguntar no fim do download: `--ask`
+
+Com `-i` / `--ask`, o `download` e o `update` guardam as faixas desta execução que não foram confirmadas: o artista não estava no banco de músicas nem no de artistas, e a pontuação do YouTube não bastou. No fim, ele faz a mesma tela do `review --answer`, só com essas faixas e só com os campos que faltam. O que você responde é gravado junto com o que ele já tinha achado (tags, banco, pasta, M3U), e o artista digitado entra no banco de artistas para as próximas. `-x album` não pergunta o álbum; `:s` pula a faixa, `:q` termina. Fora de um terminal ele não pergunta e só avisa para rodar `review --answer`.
 
 ### Responder uma por uma: `review --answer`
 

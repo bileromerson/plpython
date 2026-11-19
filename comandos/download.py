@@ -90,6 +90,12 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     h.add_argument("--review", dest="revisar", choices=["all", "diff", "none"], default="all",
                    help="o que marcar como OBSERVAR: all = divergências + dados só do YouTube (padrão); "
                         "diff = só divergências; none = não marca nada")
+    h.add_argument("-i", "--ask", dest="perguntar", action="store_true",
+                   help="no fim, pergunta os dados que faltam das faixas desta execução que não foram "
+                        "confirmadas (nem pelo banco, nem pela lista de artistas, nem pelo YouTube); "
+                        "é o mesmo que rodar review --answer só nelas")
+    h.add_argument("-x", "--skip", dest="ignorar", nargs="+", action="extend", default=[], metavar="CAMPO",
+                   help="com --ask: não pergunta estes campos (title, artists, album, isrc)")
     h.add_argument("-nr", "--no-review", dest="revisar", action="store_const", const="none",
                    help="atalho para --review none: segue direto sem lista de conferência")
 

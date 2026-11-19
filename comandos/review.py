@@ -97,6 +97,8 @@ def _abrir(args: argparse.Namespace) -> sqlite3.Connection:
             f"banco não encontrado: {metadados}\n"
             "Rode o comando na mesma pasta onde rodou o download, ou use --metadata-db/--downloads-db."
         )
+    if getattr(args, "artists_db", None):
+        pltube.ARTISTAS_DB = os.path.abspath(args.artists_db)
     return pltube.abrir_banco_estado(downloads, metadados)
 
 
@@ -107,8 +109,12 @@ def _artistas(texto: str) -> str:
         return texto or ""
 
 
-def _linhas(conexao: sqlite3.Connection, status: tuple[str, ...], busca: str) -> list[sqlite3.Row]:
+def _linhas(conexao: sqlite3.Connection, status: tuple[str, ...], busca: str,
+            chaves: "set[str] | None" = None) -> list[sqlite3.Row]:
     where, params = [], []
+    if chaves is not None:  # só estas faixas (o download --ask pergunta as que acabou de baixar)
+        where.append(f"t.video_key IN ({','.join('?' * len(chaves)) or 'NULL'})")
+        params += sorted(chaves)
     if status:
         where.append(f"t.metadata_status IN ({','.join('?' * len(status))})")
         params += list(status)
@@ -604,7 +610,7 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
     pltube.LOG_FILE = os.path.join(os.getcwd(), "Logs.txt")
     os.makedirs(pasta_playlists, exist_ok=True)
 
-    linhas = _linhas(conexao, STATUS_FILTRO[args.status], args.busca or "")
+    linhas = _linhas(conexao, STATUS_FILTRO[args.status], args.busca or "", getattr(args, "chaves", None))
     if not linhas:
         print("Nenhuma faixa para conferir.")
         return 0
@@ -707,6 +713,12 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
                               + (" (vai no --apply)" if adiar and c == "artists" else "")
                               for c in faltam) or "título/artista"
             anterior = _cor(f"◐ {rotulo}{detalhe}: salvo; continua na lista (falta: {falta})", "33")
+        if novos.get("artists"):  # o que você digitou entra no banco de artistas
+            import banco_artistas
+
+            for nome in novos["artists"]:
+                banco_artistas.adicionar(conexao, nome, "manual")
+            conexao.commit()
         if digitados and ca.registrar(conexao, artistas_atuais, digitados, linha["video_key"],
                                       str((resultado.get("source_youtube") or {}).get("uploader") or "")):
             regras_sessao = [r for r in regras_sessao if not ca.mesmos_nomes(r.de, artistas_atuais)]

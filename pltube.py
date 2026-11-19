@@ -17,6 +17,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -53,6 +54,8 @@ REVISAR = "all"  # all | diff | none
 STATUS_REVISAO = ("PENDENTE", "OBSERVAR")
 MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
 RESOLVER_CACHE: dict[str, Any] = {}
+FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução sem dados confirmados
+ARTISTAS_DB = ""  # --artists-db; vazio = artistas.sqlite3 ao lado do banco de músicas
 ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
 FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music"}
@@ -82,7 +85,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
     global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC, PAUSA_YOUTUBE, COOKIES_YTDLP
-    global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
+    global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR, ARTISTAS_DB
 
     caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
     if os.path.isfile(caminho_csv):
@@ -114,6 +117,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     if pausa is not None:
         PAUSA_YOUTUBE = tuple(pausa)
     REVISAR = getattr(args, "revisar", None) or "all"
+    ARTISTAS_DB = os.path.abspath(args.artists_db) if getattr(args, "artists_db", None) else ""
 
 
 def registrar_erro(url: str, motivo: str, playlist: str = "") -> None:
@@ -448,6 +452,9 @@ def abrir_banco_estado(
     conexao = sqlite3.connect(downloads_path, timeout=30)
     conexao.row_factory = sqlite3.Row
     conexao.execute("ATTACH DATABASE ? AS music", (metadata_path,))
+    import banco_artistas
+
+    banco_artistas.anexar(conexao, ARTISTAS_DB or os.path.join(os.path.dirname(metadata_path), "artistas.sqlite3"))
     conexao.executescript(
         """
         CREATE TABLE IF NOT EXISTS video_cache (
@@ -1012,7 +1019,36 @@ def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str
         except (TypeError, ValueError):
             continue
     v("SQL", f"{len(nomes)} artistas já confirmados carregados da biblioteca")
+    import banco_artistas
+
+    if banco_artistas.anexado(conexao):
+        try:
+            if banco_artistas.vazio(conexao):
+                novos = banco_artistas.importar_biblioteca(conexao)
+                if novos:
+                    v("SQL", f"banco de artistas criado com {novos} artista(s) da biblioteca")
+            extras = [n for n in banco_artistas.nomes_conhecidos(conexao) if n not in nomes]
+        except sqlite3.Error as exc:
+            v("SQL", f"banco de artistas indisponível: {exc}")
+            extras = []
+        if extras:
+            v("SQL", f"{len(extras)} nome(s)/variação(ões) a mais vindos do banco de artistas")
+        return list(nomes) + extras
     return list(nomes)
+
+
+def aprender_artistas(conexao: sqlite3.Connection | None, resultado: dict[str, Any], origem: str) -> None:
+    """Artistas de uma faixa confirmada vão para o banco de artistas."""
+    import banco_artistas
+
+    if not banco_artistas.anexado(conexao) or (resultado or {}).get("status") != "RESOLVIDO":
+        return
+    try:
+        for nome in (resultado.get("metadata") or {}).get("artists") or []:
+            banco_artistas.adicionar(conexao, nome, origem)
+        conexao.commit()
+    except sqlite3.Error as exc:
+        v("SQL", f"não foi possível guardar no banco de artistas: {exc}")
 
 
 def artista_confiavel(resultado: dict[str, Any] | None) -> bool:
@@ -1044,6 +1080,10 @@ def resolver_meta_hibrido(
         exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
         dados_locais=dados_locais,
     ).to_dict()
+    import banco_artistas
+
+    for de, para in banco_artistas.corrigir_resultado(estado, resultado):
+        v("SQL", f"banco de artistas: {de} → {para}")
     return meta_do_resultado_hibrido(resultado), resultado
 
 
@@ -2022,9 +2062,13 @@ def _processar_csv(
                                         for nome in meta.get("artists") or []:
                                             if nome not in ARTISTAS_CONHECIDOS:
                                                 ARTISTAS_CONHECIDOS.append(nome)
+                                        aprender_artistas(estado, hybrid_result, "download")
                                     if estado is not None:
                                         aprender_canal(estado, video_key, hybrid_result)
                                         salvar_resolucao(estado, video_key, hybrid_result)
+                                        if hybrid_result.get("status") in ("PENDENTE", "OBSERVAR") \
+                                                and video_key not in FAIXAS_PARA_PERGUNTAR:
+                                            FAIXAS_PARA_PERGUNTAR.append(video_key)
                                 if estado is not None and hybrid_result:
                                     _salvar_metadados_musica(estado, video_key, hybrid_result)
 
@@ -2143,6 +2187,35 @@ def _processar_csv(
     return not bloqueado
 
 
+def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> None:
+    """download --ask: o que não foi confirmado nem pelo banco, nem pela lista de artistas,
+    nem pela pontuação do YouTube vira pergunta no fim, só nos campos que faltam."""
+    if not FAIXAS_PARA_PERGUNTAR:
+        return
+    chaves = {
+        k for k in FAIXAS_PARA_PERGUNTAR
+        if (estado.execute("SELECT status FROM music.metadata_resolution WHERE video_key = ?", (k,))
+            .fetchone() or [""])[0] in ("PENDENTE", "OBSERVAR")
+    }
+    if not chaves:
+        return
+    if not sys.stdin.isatty():
+        print(f"{len(chaves)} faixa(s) desta execução precisam dos seus dados; fora de um terminal não dá "
+              "para perguntar. Rode: plpython.py review --answer")
+        return
+    from comandos import review
+
+    print(f"\n{len(chaves)} faixa(s) desta execução não foram confirmadas (nem pelo banco, nem pela lista "
+          "de artistas, nem pelo YouTube). Preencha o que falta; :s pula a faixa, :q termina.\n")
+    opcoes = review.criar_parser().parse_args([])
+    opcoes.responder = True
+    opcoes.chaves = chaves
+    opcoes.songs_dir, opcoes.playlist_dir = SONGS_DIR, PLAYLISTS_DIR
+    opcoes.ignorar = list(getattr(args, "ignorar", None) or [])
+    opcoes.verbose = getattr(args, "verbose", 0)
+    review.responder(estado, opcoes)
+
+
 def executar(args: argparse.Namespace) -> int:
     """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
     global MUSICBRAINZ_CLIENT, RESOLVER_CACHE
@@ -2192,6 +2265,7 @@ def executar(args: argparse.Namespace) -> int:
     # Memória da biblioteca: artistas já confirmados ajudam a identificar os próximos.
     ARTISTAS_CONHECIDOS[:] = carregar_artistas_conhecidos(estado)
     CAPAS_BAIXADAS.clear()
+    FAIXAS_PARA_PERGUNTAR.clear()
     if getattr(args, "progresso", False):
         progresso.iniciar(sum(contar_linhas_csv(c) for c in csvs))
     try:
@@ -2208,6 +2282,9 @@ def executar(args: argparse.Namespace) -> int:
             if not continuar:
                 print("Processamento interrompido por bloqueio temporário; nenhum outro CSV será consultado agora.")
                 break
+        if getattr(args, "perguntar", False):
+            progresso.encerrar()
+            perguntar_faltando(estado, args)
     except KeyboardInterrupt:
         progresso.encerrar()
         print("\nInterrompido. O progresso confirmado foi salvo; execute o mesmo comando para retomar.")

@@ -221,6 +221,7 @@ def _aplicar_plano(conexao, plano: dict[str, Any], playlist_dir: str) -> None:
         )
         # Correção manual também ensina se o canal é do artista ou um re-upload.
         pltube.aprender_canal(conexao, plano["video_key"], plano["result"])
+        pltube.aprender_artistas(conexao, plano["result"], "review")
         conexao.commit()
     except Exception:
         conexao.rollback()
@@ -353,6 +354,8 @@ def executar(args: argparse.Namespace) -> int:
     arquivo_csv = _caminho(base, args.arquivo)
     arquivo_estado = _caminho(base, args.downloads_db)
     arquivo_metadados = _caminho(base, args.metadata_db)
+    if getattr(args, "artists_db", None):
+        pltube.ARTISTAS_DB = os.path.abspath(args.artists_db)
     padrao_musicas = os.path.join(base, "songs")
     pasta_musicas = os.path.abspath(args.songs_dir) if args.songs_dir else padrao_musicas
     pasta_playlists = (

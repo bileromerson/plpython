@@ -38,6 +38,8 @@ def opcoes_bancos(p: argparse.ArgumentParser) -> argparse._ArgumentGroup:
                    help="fila/progresso de downloads (padrão: ./sql/downloads.sqlite3)")
     g.add_argument("--metadata-db", default=os.path.join("sql", "musicas.sqlite3"), metavar="ARQ",
                    help="metadados das faixas (padrão: ./sql/musicas.sqlite3)")
+    g.add_argument("--artists-db", dest="artists_db", metavar="ARQ",
+                   help="banco de artistas e variações (padrão: artistas.sqlite3 na pasta do --metadata-db)")
     return g
 
 
