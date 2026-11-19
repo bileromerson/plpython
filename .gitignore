@@ -219,3 +219,10 @@ metadados_pendentes.csv
 # Cookies da conta do Google (dão acesso à conta; nunca enviar ao Git)
 cookies*.txt
 *cookies*.txt
+
+# Arquivos gerados pelo plpython na pasta de execução (biblioteca, bancos, logs)
+songs/
+playlists/
+sql/
+Logs.txt
+conferir.csv
