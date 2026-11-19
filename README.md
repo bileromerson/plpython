@@ -46,7 +46,7 @@ pasta onde você rodou/
 | `playlist` | cria/atualiza CSVs a partir de playlists do YouTube (URL, suas playlists, curtidas, assistir mais tarde) |
 | `download` | baixa os CSVs, identifica as músicas e gera as M3Us; retoma de onde parou |
 | `update` | relê os CSVs, refaz falhas e reavalia `PENDENTE`/`OBSERVAR` sem baixar de novo o que já existe |
-| `review` | mostra e confirma no terminal as faixas guardadas no SQL |
+| `review` | mostra e confirma no terminal as faixas guardadas no SQL; `--answer` corrige uma por uma |
 | `metadata` | aplica as correções feitas na planilha `metadados_pendentes.csv` (simula sem `--apply`) |
 | `spotify` | lista as faixas de uma playlist do Spotify (só consulta) |
 | `revert` | converte uma biblioteca no layout antigo `songs/_library` para pastas por artista (simula sem `--apply`) |
@@ -71,6 +71,7 @@ python plpython.py update -c csvs -v
 
 # conferência
 python plpython.py review -d
+python plpython.py review --answer
 python plpython.py review --ok UG1HUOyL9IA
 python plpython.py review --export conferir.csv
 python plpython.py metadata --apply
@@ -143,6 +144,43 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 | `--no-hybrid` | desliga a identificação (mais rápido, só YouTube) |
 
 ## Conferir e corrigir
+
+### Responder uma por uma: `review --answer`
+
+```bash
+python plpython.py review --answer                 # Enter deixa como está; só muda o que você digitar
+python plpython.py review --answer --default-ok    # Enter aceita; a faixa sai da lista
+```
+
+Para cada faixa `OBSERVAR`/`PENDENTE`, aparece o que está errado e uma pergunta por campo, com o valor atual entre colchetes e as opções do YouTube e do banco (MusicBrainz) quando elas diferem:
+
+```
+[2/12] OBSERVAR  https://youtu.be/aaaaaaaaaaa
+  arquivo: songs/Daft Punk/Get Lucky [aaaaaaaaaaa].mp3
+  O que está errado:
+    • título diverge: YouTube='Get Lucky Remix' / MusicBrainz='Get Lucky'
+    • álbum não encontrado
+  Título [Get Lucky Remix]  (banco: Get Lucky): :db
+  Artistas [Daft Punk]:
+  Álbum [—]  (banco: Random Access Memories): :db
+  ✓ conferida (Título, Álbum): Daft Punk — Get Lucky | Random Access Memories
+```
+
+| Resposta | Efeito |
+|---|---|
+| Enter | mantém o valor |
+| texto | novo valor (artistas: separe com `|`; o primeiro é o principal) |
+| `:db` / `:yt` | usa o valor do banco / do YouTube |
+| `:-` | apaga (álbum ou ISRC) |
+| `:ok` (no título) | está tudo certo como está |
+| `:s` / `:q` (no título) | pula esta faixa / sai (o que já foi respondido fica salvo) |
+
+- **Sem `--default-ok`:** a faixa que você deixar toda em branco **continua na lista**. Se você mudou algum campo (ou respondeu `:ok`), ela é dada como conferida, e só os campos digitados mudam.
+- **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`. Todas saem da lista.
+- **Cada resposta é gravada na hora**, igual ao `metadata --apply`: tags do MP3 (com backup), banco e M3Us. Se o artista principal mudar, o MP3 vai para a pasta do novo artista, com atalhos para os secundários, e sai de `_observar/`. O `update` não desfaz correções manuais.
+- Use `-s`/`-p` se as suas pastas de músicas/playlists não forem `./songs` e `./playlists`.
+
+### Outras formas
 
 No terminal, sem precisar de programa de SQL:
 
@@ -268,7 +306,6 @@ Testes: `python -m unittest discover -s tests -v`.
 
 A lista abaixo contém apenas itens ainda não disponíveis.
 
-- [ ] **Reorganização após correção manual:** o `download`/`update` já movem o MP3 para a pasta do artista principal quando o artista é confirmado; o `metadata --apply` ainda preserva o caminho do arquivo quando você troca o artista na planilha.
 - [ ] **Catálogo global da biblioteca:** indexar todos os arquivos locais, seus caminhos, fontes, tags e relações com playlists; permitir filtros como `unknown` e `*` para localizar pendências ou revisar o catálogo completo.
 - [ ] **Backup portátil de metadados:** criar e restaurar um catálogo SQLite com URLs, metadados e referências dos arquivos, sem exigir que os MP3s estejam conectados para consultar o catálogo. Esse backup não conterá o áudio.
 - [ ] **Transferência Spotify → YouTube:** pesquisar correspondências de faixas e gerar uma lista para revisão. O visualizador atual não faz essa conversão.

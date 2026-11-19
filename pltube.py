@@ -1538,6 +1538,17 @@ def mover_para_artista_principal(path: str, artistas: list[str]) -> str:
     return novo
 
 
+def limpar_atalhos_conferencia(path: str) -> None:
+    """Tira o atalho do MP3 das pastas _observar/_pendentes (a faixa foi conferida)."""
+    if not path:
+        return
+    for pasta in ("_observar", "_pendentes"):
+        atalho = os.path.join(SONGS_DIR, pasta, os.path.basename(path))
+        if os.path.islink(atalho):
+            os.unlink(atalho)
+            v("Arquivo", f"atalho removido de {pasta}/ (faixa conferida)")
+
+
 def _baixar_capa(url: str) -> bytes | None:
     if url in CAPAS_BAIXADAS:
         vv("Capa", "capa já baixada nesta execução (mesmo álbum)")

@@ -227,7 +227,33 @@ def _aplicar_plano(conexao, plano: dict[str, Any], playlist_dir: str) -> None:
         if os.path.exists(backup):
             os.unlink(backup)
 
+    _reorganizar_arquivo(conexao, plano)
     _atualizar_playlist(conexao, plano["video_key"], playlist_dir)
+
+
+def _reorganizar_arquivo(conexao, plano: dict[str, Any]) -> None:
+    """Depois de gravar: MP3 na pasta do artista principal, atalhos para os
+    secundários e fora das pastas de conferência quando foi confirmado."""
+    resultado = plano["result"]
+    artistas = [str(a) for a in (resultado.get("metadata") or {}).get("artists") or [] if str(a).strip()]
+    caminho = plano["audio_path"]
+    if not artistas or not os.path.isfile(caminho):
+        return
+    novo = caminho
+    if resultado.get("status") != "PENDENTE":
+        novo = pltube.mover_para_artista_principal(caminho, artistas)
+    if novo != caminho:
+        relativo = pltube._caminho_relativo_banco(novo, conexao)
+        conexao.execute("UPDATE music.metadata_resolution SET audio_path = ? WHERE video_key = ?",
+                        (relativo, plano["video_key"]))
+        conexao.execute("UPDATE video_cache SET path = ? WHERE video_key = ?", (relativo, plano["video_key"]))
+        conexao.execute("UPDATE playlist_items SET path = ? WHERE video_key = ?", (relativo, plano["video_key"]))
+        conexao.commit()
+        plano["audio_path"] = novo
+    for artista in artistas[1:]:
+        pltube.criar_link_artista(novo, artista)
+    if resultado.get("status") == "RESOLVIDO":
+        pltube.limpar_atalhos_conferencia(novo)
 
 
 def aplicar_revisoes(
