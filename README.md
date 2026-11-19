@@ -303,6 +303,8 @@ Funciona no `download`, `update`, `playlist`, `metadata` e `review`. Sem `-v`, a
 | `-vv` | tudo do `-v` e mais: tempo decorrido; cada hipótese de artista/título com a confiança; os motivos da avaliação do canal; os candidatos do MusicBrainz com nota; os metadados lidos do YouTube campo a campo; cada tag gravada no MP3; requisições HTTP; avisos do yt-dlp; confiança final de cada campo |
 | `-vvv` | tudo do `-vv` e mais a depuração do próprio yt-dlp |
 
+No terminal, a saída é colorida. Cada área tem uma cor, "bate" e `RESOLVIDO` aparecem em verde, "não bate" e `OBSERVAR` em amarelo, e erros e `PENDENTE` em vermelho. Se a saída for redirecionada para um arquivo, ela sai sem cor. `NO_COLOR=1` desliga as cores.
+
 Exemplo de `-v`:
 
 ```

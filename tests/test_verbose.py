@@ -32,6 +32,22 @@ class VerboseTests(unittest.TestCase):
         self.assertNotIn("nivel3", dois)
         self.assertIn("nivel3", self.capturar(3, falar))
 
+    def test_cores_so_quando_ativadas(self):
+        def falar():
+            verbose.v("Comparação", "título: YouTube 'A' ≠ banco 'B' → não bate; preferência youtube")
+            verbose.v("Resultado", "RESOLVIDO: X — Y")
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=False):
+            colorido = self.capturar(1, falar)
+        self.assertIn("\033[1;35m[Comparação]\033[0m", colorido)
+        self.assertIn("\033[33m≠\033[0m", colorido)
+        self.assertIn("\033[1;32mRESOLVIDO\033[0m", colorido)
+        with patch.dict("os.environ", {"FORCE_COLOR": "1", "NO_COLOR": "1"}, clear=False):
+            self.assertNotIn("\033", self.capturar(1, falar))
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("FORCE_COLOR", None)
+            self.assertNotIn("\033", self.capturar(1, falar))  # saída que não é terminal: sem cor
+
     def test_contagem_de_v_na_linha_de_comando(self):
         for argv, esperado in ((["download"], 0), (["download", "-v"], 1), (["download", "-vv"], 2),
                                (["download", "-v", "-v", "-v"], 3), (["update", "--verbose"], 1)):
