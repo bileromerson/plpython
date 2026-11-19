@@ -13,7 +13,7 @@ import os
 import sys
 import urllib.parse
 
-from comandos._comum import cookies_ytdlp, descrever_conta, novo_parser, opcoes_conta, traduzir_ajuda
+from comandos._comum import ativar_verbose, opcoes_verbose, cookies_ytdlp, descrever_conta, novo_parser, opcoes_conta, traduzir_ajuda
 
 NOME = "playlist"
 APELIDOS = ("importar",)
@@ -55,6 +55,7 @@ def criar_parser(prog: str = "plpython.py playlist") -> argparse.ArgumentParser:
     p.add_argument("--include-unavailable", dest="incluir_indisponiveis", action="store_true",
                    help="mantém vídeos privados/apagados no CSV (padrão: ficam de fora)")
     opcoes_conta(p)
+    opcoes_verbose(p)
     return traduzir_ajuda(p)
 
 
@@ -108,6 +109,7 @@ def escrever_csv(info: dict, pasta: str, nome: str | None, incluir_indisponiveis
 
 
 def executar(args: argparse.Namespace) -> int:
+    ativar_verbose(args)
     import pltube
 
     if pltube.yt_dlp is None:

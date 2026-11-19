@@ -33,6 +33,8 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from verbose import curto, v, vv
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
@@ -142,9 +144,11 @@ class MusicBrainzClient:
 
     def _get_json(self, url: str, *, rate_limited: bool) -> dict[str, Any]:
         if url in self._json_cache:
+            vv("MusicBrainz", f"resposta já em memória: {curto(url, 110)}")
             return copy.deepcopy(self._json_cache[url])
         if rate_limited:
             self._wait_for_musicbrainz_slot()
+        vv("MusicBrainz", f"GET {curto(url, 140)}")
         headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json",
@@ -834,7 +838,11 @@ def _cached_search(
     cache: MutableMapping[str, Any], key: str, search: Callable[[], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     if key not in cache:
+        v("MusicBrainz", f"buscando {curto(key.replace('|', ' / '), 100)}")
         cache[key] = copy.deepcopy(search())
+        v("MusicBrainz", f"  {len(cache[key] or [])} gravação(ões) encontrada(s)")
+    else:
+        v("MusicBrainz", f"busca repetida, usando o resultado anterior: {curto(key, 80)}")
     value = cache[key]
     return copy.deepcopy(value) if isinstance(value, list) else []
 
@@ -1732,6 +1740,17 @@ def resolver_com_prioridade(
         hipoteses.sort(key=lambda h: h["prior"], reverse=True)
     vazia = {"title": "", "artists": [], "origem": "", "prior": 0.0}
     base = hipoteses[0] if hipoteses else vazia
+    v("Modelo", f"canal '{canal['bruto']}' → {canal['tipo']} ({canal['pontos']:+d} pontos)")
+    for motivo in canal["motivos"]:
+        vv("Modelo", f"  canal: {motivo}")
+    if analise["variante"]:
+        vv("Modelo", f"versão alterada detectada no título: {analise['variante']}")
+    for h in hipoteses[:8]:
+        vv("Modelo", f"  hipótese {h['prior']:.0%}  {' & '.join(h['artists']) or '(sem artista)'} — "
+                     f"{h['title']}  [{h['origem']}]")
+    if base["title"]:
+        v("Modelo", f"melhor palpite pelo YouTube: {' & '.join(base['artists']) or '?'} — {base['title']} "
+                    f"({base['prior']:.0%}, {base['origem']})")
     explicita = next((h for h in hipoteses if h["origem"] in FONTES_EXPLICITAS), None)
 
     metadata: dict[str, Any] = {
@@ -1806,6 +1825,8 @@ def resolver_com_prioridade(
                         chave = f"title_only:{_normalize_text(h['title'])}"
                         op = (lambda h=h: client.search_by_title(h["title"], limit=limite_candidatos))
                     tentativas += 1
+                    v("Modelo", f"conferindo no MusicBrainz: {' & '.join(h['artists']) or '(sem artista)'} — "
+                                f"{h['title']} ({h['origem']})")
                     brutos = _cached_search(cache, chave, op)
                     if not brutos and len(h["artists"]) > 1:
                         brutos = _cached_search(cache, chave + "|primeiro", lambda h=h: client.search_by_title_artist(
@@ -1817,8 +1838,14 @@ def resolver_com_prioridade(
                     )
                     if not ranked:
                         continue
+                    for cand, nota in ranked[:3]:
+                        vv("MusicBrainz", f"  candidato {nota:.2f}  {' & '.join(_artists(cand.get('artists')))} — "
+                                          f"{_text(cand.get('title'))}  ({len(cand.get('releases') or [])} lançamentos)")
                     limiar = limiar_correspondencia if h["artists"] else max(limiar_correspondencia, 0.9)
                     chosen, ambiguo = _choose_ranked(ranked, threshold=limiar, margin=margem_correspondencia)
+                    if chosen is None:
+                        v("MusicBrainz", f"  nenhum candidato confiável (melhor nota {ranked[0][1]:.2f}, mínimo "
+                                         f"{limiar:.2f}{', empate entre candidatos' if ambiguo else ''})")
                     if chosen is not None:
                         total = ranked[0][1] + 0.15 * h["prior"]
                         if melhor is None or total > melhor[0]:
@@ -1833,11 +1860,14 @@ def resolver_com_prioridade(
                     candidatos = [_public_candidate(c, sc) for c, sc in ranked[:5]]
         except Exception as exc:  # rede, limite, cliente injetado: o download segue sem MusicBrainz
             diag["musicbrainz"].append(f"MusicBrainz indisponível: {exc}")
+            v("Erro", f"MusicBrainz indisponível; seguindo só com o YouTube: {exc}")
 
     if escolhido is not None:
         # Compara o MusicBrainz com o dado explícito do YouTube, se houver; senão
         # com a hipótese que bateu (que veio do título/canal do vídeo).
         referencia = explicita or hipotese_escolhida
+        v("MusicBrainz", f"correspondência: {' & '.join(_artists(escolhido.get('artists')))} — "
+                         f"{_text(escolhido.get('title'))} (via {hipotese_escolhida['origem']})")
         metadata["title"] = referencia["title"]
         metadata["artists"] = list(referencia["artists"])
         origem_yt = referencia["origem"]
@@ -1850,14 +1880,20 @@ def resolver_com_prioridade(
             if not mb_val:
                 continue
             iguais = _mesmos_artistas(yt_val, mb_val) if campo == "artists" else _mesmo_texto(yt_val, mb_val)
+            mostrar = (lambda x: " & ".join(x)) if campo == "artists" else (lambda x: x)
             if not yt_val or iguais:
                 metadata[campo] = mb_val
                 provenance[campo] = "youtube_validado_musicbrainz" if yt_val else "musicbrainz"
                 confidence[campo] = "confirmada"
                 scores[campo] = 0.98
+                v("Comparação", f"{rotulo}: YouTube '{mostrar(yt_val)}' = banco '{mostrar(mb_val)}' → "
+                                f"bate, usando a grafia do banco" if yt_val else
+                                f"{rotulo}: só o banco tem → '{mostrar(mb_val)}'")
                 continue
-            mostrar = (lambda v: " | ".join(v)) if campo == "artists" else (lambda v: v)
             divergencias.append(f"{rotulo} diverge: YouTube='{mostrar(yt_val)}' / MusicBrainz='{mostrar(mb_val)}'")
+            escolha = mb_val if preferir == "musicbrainz" else yt_val
+            v("Comparação", f"{rotulo}: YouTube '{mostrar(yt_val)}' ≠ banco '{mostrar(mb_val)}' → não bate; "
+                            f"preferência {preferir}: usando '{mostrar(escolha)}' (vai para conferência)")
             if preferir == "musicbrainz":
                 metadata[campo] = mb_val
                 provenance[campo] = "musicbrainz"
@@ -1883,6 +1919,10 @@ def resolver_com_prioridade(
 
         release, conf_release = escolher_release(escolhido, metadata["album"], metadata["artists"])
         if release:
+            tipo_release = "/".join([release.get("primary_type") or "?"] + list(release.get("secondary_types") or []))
+            v("Álbum", f"lançamento escolhido: '{release['title']}' ({tipo_release}, {release.get('status') or '?'}, "
+                       f"{release.get('date') or 'sem data'}) entre {len(escolhido.get('releases') or [])}; "
+                       f"faixa {release.get('track_number') or '?'}/{release.get('track_total') or '?'}")
             album_yt = metadata["album"]
             if album_yt and not _mesmo_texto(album_yt, release["title"]) and provenance.get("album") in {"youtube_music", "youtube"}:
                 divergencias.append(f"álbum diverge: YouTube='{album_yt}' / MusicBrainz='{release['title']}'")
@@ -1910,6 +1950,7 @@ def resolver_com_prioridade(
                 except Exception as exc:
                     url = None
                     diag["musicbrainz"].append(f"Cover Art Archive indisponível: {exc}")
+                v("Capa", f"Cover Art Archive: {url}" if url else "Cover Art Archive: este álbum não tem capa cadastrada")
                 if url:
                     metadata["cover_url"], metadata["cover_source"] = url, "cover_art_archive"
                     provenance["cover_url"] = "cover_art_archive"
@@ -1917,6 +1958,8 @@ def resolver_com_prioridade(
     elif hipoteses and not tem_manual:
         if consultar_musicbrainz:
             diag["musicbrainz"].append("MusicBrainz não encontrou correspondência confiável")
+            v("Comparação", "nada no banco para comparar; ficam os dados do YouTube "
+                            f"(confiança {base['prior']:.0%})")
         if base["prior"] < LIMIAR_CONFIANCA:
             de_onde = {
                 "youtube_titulo_artista_primeiro": "do título do vídeo (\"Artista - Música\")",
@@ -1969,6 +2012,16 @@ def resolver_com_prioridade(
         divergencias, baixa_confianca = [], []
     marcar = {"all": divergencias + baixa_confianca + faltando, "diff": divergencias, "none": []}[revisar]
     status = "PENDENTE" if motivos else ("OBSERVAR" if marcar else "RESOLVIDO")
+    if tem_manual:
+        v("SQL", "correção manual salva encontrada; ela vence YouTube e banco")
+    v("Resultado", f"{status}: {' & '.join(metadata['artists']) or '?'} — {metadata['title'] or '?'}"
+                   f"{' | álbum ' + metadata['album'] if metadata['album'] else ''}"
+                   f"{' | capa: ' + metadata['cover_source'] if metadata['cover_source'] else ''}")
+    for motivo in motivos + (marcar if status == "OBSERVAR" else []):
+        v("Resultado", f"  motivo: {motivo}")
+    for campo, nota in sorted(scores.items()):
+        fonte = provenance.get(campo) or (metadata.get("cover_source") if campo == "cover" else "") or "?"
+        vv("Resultado", f"  confiança {campo}: {nota:.0%} (fonte: {fonte})")
     observacoes = divergencias + baixa_confianca + faltando
     return ResolutionResult(
         video_id=metadata["id"],

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from comandos._comum import novo_parser, oculto, opcoes_bancos, opcoes_pastas, traduzir_ajuda
+from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, oculto, opcoes_bancos, opcoes_pastas, traduzir_ajuda
 
 NOME = "metadata"
 APELIDOS = ("metadados",)
@@ -26,10 +26,12 @@ def criar_parser(prog: str = "plpython.py metadata") -> argparse.ArgumentParser:
     oculto(p, "--arquivo", dest="arquivo")
     p.add_argument("--apply", action="store_true", help="grava as mudanças; sem isto só simula")
     opcoes_bancos(p)
+    opcoes_verbose(p)
     return traduzir_ajuda(p)
 
 
 def executar(args: argparse.Namespace) -> int:
+    ativar_verbose(args)
     import aplicar_metadados
 
     args.base_dir = os.getcwd()

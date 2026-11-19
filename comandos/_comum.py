@@ -99,3 +99,22 @@ def descrever_conta(cookies: dict) -> str:
         nome, perfil = cookies["cookiesfrombrowser"][:2]
         return f"conta logada no {nome}" + (f" (perfil {perfil})" if perfil else "")
     return ""
+
+
+def opcoes_verbose(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "-v", "--verbose", dest="verbose", action="count", default=0,
+        help="mostra detalhes, como no nmap: -v (erros silenciosos, consultas ao SQL/YouTube/"
+             "MusicBrainz, YouTube x banco), -vv (tudo: hipóteses, metadados campo a campo, tags), "
+             "-vvv (também a depuração do yt-dlp)",
+    )
+
+
+def ativar_verbose(args: argparse.Namespace) -> None:
+    import verbose
+
+    nivel = getattr(args, "verbose", 0) or 0
+    verbose.definir(nivel)
+    if nivel:
+        nomes = {1: "-v", 2: "-vv"}
+        print(f"Modo detalhado {nomes.get(nivel, '-vvv')} ativo.")

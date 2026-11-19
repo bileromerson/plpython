@@ -13,7 +13,7 @@ import sqlite3
 import sys
 
 import pltube
-from comandos._comum import novo_parser, opcoes_bancos, traduzir_ajuda
+from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, opcoes_bancos, traduzir_ajuda
 
 NOME = "review"
 APELIDOS = ("revisar",)
@@ -49,6 +49,7 @@ def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
     p.add_argument("--export", metavar="CSV", help="salva a lista filtrada num CSV para abrir no Excel")
     p.add_argument("--sql", metavar="SELECT", help="executa uma consulta SQL somente leitura")
     opcoes_bancos(p)
+    opcoes_verbose(p)
     return traduzir_ajuda(p)
 
 
@@ -201,6 +202,7 @@ def exportar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 
 def executar(args: argparse.Namespace) -> int:
+    ativar_verbose(args)
     try:
         conexao = _abrir(args)
     except (FileNotFoundError, sqlite3.Error, OSError) as exc:

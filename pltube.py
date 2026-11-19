@@ -17,6 +17,8 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import verbose
+from verbose import curto, v, vv, vvv
 from resolvedor_metadados import (
     LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
     ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade, resolver_metadados,
@@ -64,6 +66,7 @@ _ULTIMA_CONSULTA_YOUTUBE: float | None = None
 INFO_YOUTUBE: dict[str, dict[str, Any]] = {}
 # Conta do Google (cookies) para o yt-dlp: {"cookiesfrombrowser": (...)} ou {"cookiefile": ...}
 COOKIES_YTDLP: dict[str, Any] = {}
+_ULTIMO_STATUS_GRAVADO: dict[str, str] = {}  # só para o -vv não repetir a mesma linha
 _DICA_LOGIN_MOSTRADA = False
 MAX_INFO_YOUTUBE = 50
 
@@ -108,6 +111,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
 
 def registrar_erro(url: str, motivo: str, playlist: str = "") -> None:
     """Registra falhas sem interromper o processamento do restante da playlist."""
+    v("Erro", f"{curto(motivo, 160)}  ({url})")
     try:
         pasta = os.path.dirname(LOG_FILE)
         if pasta:
@@ -127,10 +131,10 @@ class MeuLogger:
         self.errors: list[str] = []
 
     def debug(self, msg: str) -> None:
-        pass
+        vvv("yt-dlp", msg)
 
     def warning(self, msg: str) -> None:
-        pass
+        vv("yt-dlp", f"aviso: {msg}")
 
     def error(self, msg: str) -> None:
         self.errors.append(str(msg))
@@ -201,7 +205,10 @@ def aguardar_vez_youtube() -> None:
         alvo = random.uniform(minimo, maximo)
         falta = alvo - (time.monotonic() - _ULTIMA_CONSULTA_YOUTUBE)
         if falta > 0:
+            v("Pausa", f"aguardando {falta:.1f}s antes de consultar o YouTube (pausa sorteada {alvo:.1f}s)")
             time.sleep(falta)
+        else:
+            vv("Pausa", f"pausa de {alvo:.1f}s já cumprida pelo trabalho anterior; sem espera")
     _ULTIMA_CONSULTA_YOUTUBE = time.monotonic()
 
 
@@ -220,6 +227,7 @@ def executar_com_retentativas(url: str, csv_file: str, operacao):
                 dica_login(mensagem)
                 return None
 
+            v("YouTube", f"erro reconhecido como {'limite da sessão' if tipo == 'sessao' else 'falha de rede'}")
             if tipo == "sessao":
                 esperas = ESPERAS_LIMITE_SESSAO
                 aviso = ("O YouTube limitou esta sessão (segundo o yt-dlp, por até 1 hora). "
@@ -656,8 +664,10 @@ def migrar_banco_legado(
 def ler_video_cache(conexao: sqlite3.Connection, video_key: str) -> dict[str, Any] | None:
     linha = conexao.execute("SELECT * FROM video_cache WHERE video_key = ?", (video_key,)).fetchone()
     if not linha:
+        v("SQL", f"{video_key}: ainda não está no banco de downloads")
         return None
     registro = dict(linha)
+    v("SQL", f"{video_key}: encontrado no banco (status {registro.get('status')})")
     registro["artists"] = json.loads(registro.pop("artists_json") or "[]")
     registro["path"] = _resolver_caminho_banco(registro.get("path") or "", conexao)
     return registro
@@ -755,10 +765,13 @@ def carregar_resolucao(
         (video_key,),
     ).fetchone()
     if not linha:
+        vv("SQL", f"{video_key}: sem metadados salvos")
         return None
     try:
+        resultado = json.loads(linha["result_json"])
+        v("SQL", f"{video_key}: metadados salvos encontrados (status {resultado.get('status')})")
         return {
-            "result": json.loads(linha["result_json"]),
+            "result": resultado,
             "audio_path": _resolver_caminho_banco(linha["audio_path"], conexao),
         }
     except (TypeError, json.JSONDecodeError):
@@ -768,6 +781,10 @@ def carregar_resolucao(
 def _salvar_metadados_musica(
     conexao: sqlite3.Connection, video_key: str, dados: dict[str, Any]
 ) -> None:
+    status = dados.get("status")
+    if status and _ULTIMO_STATUS_GRAVADO.get(video_key) != status:
+        _ULTIMO_STATUS_GRAVADO[video_key] = status
+        vv("SQL", f"{video_key}: metadados gravados no banco (status {status})")
     """Mantém uma linha estruturada por faixa no banco dedicado de músicas."""
     resultado_hibrido = isinstance(dados.get("metadata"), dict)
     metadata = dados.get("metadata") if resultado_hibrido else dados
@@ -907,10 +924,13 @@ def perfil_canal(conexao: sqlite3.Connection | None, chave: str) -> dict[str, An
         votos[linha["kind"]] = votos.get(linha["kind"], 0) + linha["n"]
         if linha["kind"] == "artista" and linha["artist"]:
             artistas[linha["artist"]] = artistas.get(linha["artist"], 0) + linha["n"]
+    vv("SQL", f"canal {chave}: votos {votos}")
     if votos["artista"] == votos["curador"]:
         return None
     tipo = "artista" if votos["artista"] > votos["curador"] else "curador"
     principal = max(artistas, key=artistas.get) if artistas else ""
+    v("SQL", f"canal já conhecido: {'do artista ' + principal if tipo == 'artista' else 're-upload/curadoria'} "
+             f"({votos['artista']} x {votos['curador']} votos)")
     return {"kind": tipo, "artists": [principal] if principal and tipo == "artista" else [], "votos": votos}
 
 
@@ -935,6 +955,7 @@ def aprender_canal(conexao: sqlite3.Connection | None, video_key: str, resultado
     if not nome or not chave or not artistas:
         return
     artista = next((a for a in artistas if _mesmo_nome(nome, a)), "")
+    v("SQL", f"aprendido: canal '{nome}' é " + (f"do artista {artista}" if artista else "re-upload/curadoria"))
     conexao.execute(
         """INSERT INTO music.channel_votes (channel_key, video_key, channel_name, kind, artist)
            VALUES (?, ?, ?, ?, ?)
@@ -959,6 +980,7 @@ def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str
                     nomes[str(nome).strip()] = None
         except (TypeError, ValueError):
             continue
+    v("SQL", f"{len(nomes)} artistas já confirmados carregados da biblioteca")
     return list(nomes)
 
 
@@ -1033,6 +1055,18 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
             if valores:
                 tags.add(TXXX(encoding=3, desc=desc, text=valores))
 
+        v("Tags", f"gravando no MP3: {os.path.basename(audio_path)}")
+        if verbose.ativo(2):
+            for rotulo, valor in (
+                ("título", metadata.get("title")), ("artistas", artistas), ("álbum", metadata.get("album")),
+                ("artista do álbum", album_artistas), ("data", metadata.get("date")),
+                ("faixa", f"{metadata.get('track_number') or ''}/{metadata.get('track_total') or ''}"),
+                ("disco", metadata.get("disc_number")), ("gravadora", metadata.get("label")),
+                ("ISRC", metadata.get("isrc")), ("MusicBrainz gravação", metadata.get("musicbrainz_recording_id")),
+                ("MusicBrainz álbum", metadata.get("musicbrainz_release_id")),
+            ):
+                if valor and valor != "/":
+                    vv("Tags", f"  {rotulo}: {' & '.join(valor) if isinstance(valor, list) else valor}")
         texto(TIT2, "TIT2", metadata.get("title"))
         texto(TPE1, "TPE1", artistas)
         texto(TALB, "TALB", metadata.get("album"))
@@ -1058,6 +1092,8 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
         marcador = str(tags.get("TXXX:PLTUBE_COVER") or "")
         fonte = metadata.get("cover_source") or ""
         url = str(metadata.get("cover_url") or "")
+        if marcador and (marcador == url or (marcador == "thumbnail-recortada" and fonte != "cover_art_archive")):
+            vv("Capa", "capa já aplicada em execução anterior; nada a fazer")
         if fonte == "cover_art_archive" and url and marcador != url:
             imagem = _baixar_capa(url)
             if imagem:
@@ -1065,6 +1101,7 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
                 mime = "image/png" if imagem[:4] == b"\x89PNG" else "image/jpeg"
                 tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=imagem))
                 extra("PLTUBE_COVER", url)
+                v("Capa", "capa do álbum aplicada no MP3 (substituiu a thumbnail)")
         elif fonte in {"youtube_thumbnail", "youtube_music_thumbnail"} and not marcador:
             atuais = tags.getall("APIC")
             if atuais:
@@ -1073,6 +1110,7 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
                     tags.delall("APIC")
                     tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=quadrada))
                     extra("PLTUBE_COVER", "thumbnail-recortada")
+                    v("Capa", "sem capa do álbum: thumbnail do vídeo recortada para quadrada")
 
         status = str(resultado.get("status") or "PENDENTE")
         extra("PLTUBE_METADATA_STATUS", status)
@@ -1280,7 +1318,10 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
             # Deixa o backoff do programa controlar as novas tentativas em vez
             # de repetir imediatamente dentro do yt-dlp.
             ydl_opts.update({"retries": 0, "extractor_retries": 0, "fragment_retries": 0})
+        ydl_opts["verbose"] = verbose.ativo(3)
+        ydl_opts["no_warnings"] = not verbose.ativo(2)  # avisos do yt-dlp a partir do -vv
         aguardar_vez_youtube()
+        vv("YouTube", f"yt-dlp: extract_info (sem baixar) {url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         if not info:
@@ -1296,6 +1337,19 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
         if not artistas and not MODELO_HIBRIDO:
             raise RuntimeError("O YouTube não informou o artista deste vídeo.")
         descricao = str(info.get("description") or "")
+        if verbose.ativo(2):
+            vv("YouTube", f"  título do vídeo: {info.get('title')!r}")
+            vv("YouTube", f"  canal: {info.get('uploader') or info.get('channel')!r} (id {info.get('channel_id')}, "
+                          f"verificado: {bool(info.get('channel_is_verified'))})")
+            vv("YouTube", f"  crédito do YouTube: artistas {artistas or '-'} | faixa {info.get('track') or '-'} | "
+                          f"álbum {info.get('album') or '-'} | lançamento {info.get('release_date') or info.get('release_year') or '-'}")
+            vv("YouTube", f"  duração {info.get('duration') or 0}s | {len(info.get('thumbnails') or [])} thumbnails | "
+                          f"descrição {len(descricao)} caracteres")
+            ytm = ler_descricao_youtube_music(descricao)
+            if ytm:
+                vv("YouTube", f"  descrição do YouTube Music: {ytm}")
+            if _DESCRICAO_REUPLOAD.search(descricao):
+                vv("YouTube", "  descrição tem aviso típico de re-upload")
         return {
             "title": info.get("title") or info.get("id") or "musica-sem-titulo",
             "artists": artistas,
@@ -1345,8 +1399,10 @@ def baixar_reaproveitando(ydl: Any, url: str) -> None:
     info = INFO_YOUTUBE.pop(url, None)
     if not info:
         aguardar_vez_youtube()
+        v("YouTube", "baixando pela URL (metadados não estavam guardados)")
         ydl.download([url])
         return
+    v("YouTube", "baixando com os metadados já lidos (sem nova consulta ao YouTube)")
     fd, caminho = tempfile.mkstemp(prefix=".pltube-info-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
@@ -1384,6 +1440,10 @@ def criar_link_artista(arquivo_original: str, artista: str) -> bool:
     alvo_relativo = os.path.relpath(arquivo_original, start=pasta_artista)
     try:
         os.symlink(alvo_relativo, destino)
+        if artista.startswith("_"):
+            v("Arquivo", f"atalho na pasta de conferência: {os.path.relpath(destino, SONGS_DIR)}")
+        else:
+            v("Arquivo", f"atalho para o artista secundário: {os.path.relpath(destino, SONGS_DIR)}")
         return True
     except OSError as exc:
         # Em sistemas sem permissão para symlinks, hard links também não duplicam
@@ -1440,7 +1500,9 @@ def mover_para_artista_principal(path: str, artistas: list[str]) -> str:
 
 def _baixar_capa(url: str) -> bytes | None:
     if url in CAPAS_BAIXADAS:
+        vv("Capa", "capa já baixada nesta execução (mesmo álbum)")
         return CAPAS_BAIXADAS[url]
+    v("Capa", f"baixando a capa do álbum: {url}")
     dados = None
     cliente = MUSICBRAINZ_CLIENT or MusicBrainzClient()
     try:
@@ -1448,6 +1510,8 @@ def _baixar_capa(url: str) -> bytes | None:
     except Exception as exc:
         registrar_erro(url, f"Não foi possível baixar a capa do álbum: {exc}")
     CAPAS_BAIXADAS[url] = dados
+    if dados:
+        v("Capa", f"capa baixada ({len(dados) // 1024} KB)")
     return dados
 
 
@@ -1466,6 +1530,8 @@ def recortar_quadrado(imagem: bytes) -> bytes | None:
     except (OSError, subprocess.SubprocessError):
         return None
     saida = processo.stdout
+    vv("Capa", f"thumbnail recortada: {len(imagem) // 1024} KB → {len(saida) // 1024} KB "
+               f"(ffmpeg código {processo.returncode})")
     return saida if processo.returncode == 0 and saida[:3] == b"\xff\xd8\xff" else None
 
 
@@ -1526,6 +1592,8 @@ def baixar_musica(
                 ],
             }
             ydl_opts["sleep_interval_requests"] = PAUSA_ENTRE_REQUISICOES
+            ydl_opts["verbose"] = verbose.ativo(3)
+            ydl_opts["no_warnings"] = not verbose.ativo(2)
             ydl_opts.update(COOKIES_YTDLP)
             if ESPERAR_BLOQUEIO:
                 ydl_opts.update({"retries": 0, "extractor_retries": 0, "fragment_retries": 0})

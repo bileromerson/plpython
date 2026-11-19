@@ -179,6 +179,30 @@ python plpython.py download -c csvs --cookies-from-browser firefox
 - **Bloqueio da sessão** ("This content isn't available, try again later", HTTP 429, "confirm you're not a bot"): segundo o yt-dlp, dura **até 1 hora**. Sem `--wait-on-limit`, o programa para na hora e avisa para esperar cerca de 1 hora; o progresso fica salvo e basta rodar de novo. Com `--wait-on-limit`, ele espera 5, 15, 30 e 60 min (quase 2 h no total) antes de desistir.
 - **Falha de rede** (502/503/504, timeout): com `--wait-on-limit`, novas tentativas em 30 s, 1, 2, 4, 8 e 10 min.
 
+### Modo detalhado: `-v`, `-vv`, `-vvv` (como no nmap)
+
+Funciona no `download`, `update`, `playlist`, `metadata` e `review`. Sem `-v`, a saída é a de sempre.
+
+| Nível | Mostra |
+|---|---|
+| `-v` | erros que normalmente só iam para o `Logs.txt`; consultas ao SQL (encontrado/novo, canal já conhecido, o que foi aprendido); leitura e download no YouTube (inclusive quando reaproveita os metadados); pausas; buscas no MusicBrainz; **YouTube × banco campo a campo** (bate ou não bate, e qual preferência foi aplicada); álbum escolhido; capa; status final com os motivos; atalhos criados |
+| `-vv` | tudo do `-v` e mais: tempo decorrido; cada hipótese de artista/título com a confiança; os motivos da avaliação do canal; os candidatos do MusicBrainz com nota; os metadados lidos do YouTube campo a campo; cada tag gravada no MP3; requisições HTTP; avisos do yt-dlp; confiança final de cada campo |
+| `-vvv` | tudo do `-vv` e mais a depuração do próprio yt-dlp |
+
+Exemplo de `-v`:
+
+```
+[Modelo] canal 'CG5' → artista (+3 pontos)
+[Modelo] conferindo no MusicBrainz: VGR & CG5 — Fallen Down (youtube_titulo_canal)
+[MusicBrainz] buscando title_artist:fallen down / vgr cg5
+[Comparação] título: YouTube 'Fallen Down' = banco 'Fallen Down' → bate, usando a grafia do banco
+[Comparação] artista: YouTube 'VGR & CG5' = banco 'VGR & CG5' → bate, usando a grafia do banco
+[Álbum] lançamento escolhido: 'Fallen Down' (Single, Official, 2020-01-01) entre 1; faixa 3/10
+[Resultado] RESOLVIDO: VGR & CG5 — Fallen Down | álbum Fallen Down | capa: cover_art_archive
+[SQL] aprendido: canal 'CG5' é do artista CG5
+[Arquivo] atalho para o artista secundário: CG5/Fallen Down [aaaaaaaaaaa].mp3
+```
+
 **Conferir no terminal** (não precisa de programa de SQL):
 
 ```bash
