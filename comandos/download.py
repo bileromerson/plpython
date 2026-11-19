@@ -18,7 +18,7 @@ NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
 OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --no-artist-links\n"
-          "--wait-on-limit  --sleep  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
+          "-P/--progress  --wait-on-limit  --sleep  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
           "--require-isrc  --require-mb-artist  --cookies-from-browser  --cookies  -v/-vv/-vvv")
 EXEMPLOS = """\
   plpython.py download -c ./csvs                      # identifica artista, álbum e capa
@@ -30,7 +30,8 @@ EXEMPLOS = """\
   plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube
   plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa
   plpython.py download -c ./csvs --cookies-from-browser firefox  # com a sua conta do Google
-  plpython.py download -c ./csvs/Alone.csv -v         # mostra cada passo (-vv: tudo)"""
+  plpython.py download -c ./csvs/Alone.csv -v         # mostra cada passo (-vv: tudo)
+  plpython.py download -c ./csvs -P                   # barra de progresso no rodapé"""
 
 
 def _pausa(valor: str) -> tuple[float, float]:
@@ -65,6 +66,9 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("--wait-on-limit", dest="esperar_bloqueio", action="store_true",
                    help="se o YouTube bloquear, espera sozinho e tenta de novo: limite da sessão "
                         "(dura até 1 h) 5, 15, 30 e 60 min; falha de rede 30 s até 10 min")
+    p.add_argument("-P", "--progress", dest="progresso", action="store_true",
+                   help="barra de progresso fixa na última linha do terminal, como no pip: "
+                        "porcentagem do total, música atual, etapa e tempo restante")
     p.add_argument("--sleep", dest="pausa", type=_pausa, default=(5.0, 10.0), metavar="MIN[-MAX]",
                    help="pausa entre vídeos no YouTube, em segundos, sorteada entre MIN e MAX "
                         "(padrão: 5-10, como recomenda o yt-dlp; o tempo do download já conta). "

@@ -179,6 +179,24 @@ python plpython.py download -c csvs --cookies-from-browser firefox
 - **Bloqueio da sessão** ("This content isn't available, try again later", HTTP 429, "confirm you're not a bot"): segundo o yt-dlp, dura **até 1 hora**. Sem `--wait-on-limit`, o programa para na hora e avisa para esperar cerca de 1 hora; o progresso fica salvo e basta rodar de novo. Com `--wait-on-limit`, ele espera 5, 15, 30 e 60 min (quase 2 h no total) antes de desistir.
 - **Falha de rede** (502/503/504, timeout): com `--wait-on-limit`, novas tentativas em 30 s, 1, 2, 4, 8 e 10 min.
 
+### Barra de progresso: `-P` / `--progress`
+
+No `download` e no `update`, `-P` deixa uma barra fixa na **última linha** do terminal, como no `pip install`. As mensagens, inclusive as do `-v`, continuam rolando acima dela:
+
+```
+Consultando metadados: https://www.youtube.com/watch?v=bbbbbbbbbbb
+Concluído: VGR - Fallen Down
+[██████░░░░░░░░░░░░░░]  33% 1/3 · ~2m10s · Alone.csv: Won't Go - snuffles · baixando 45% de 4.8 MB
+```
+
+A barra mostra:
+- a porcentagem do total (todas as linhas de todos os CSVs);
+- o tempo restante estimado;
+- o CSV e o vídeo atuais;
+- a etapa: lendo metadados, pausa, identificando, baixando com a %, convertendo para MP3, gravando tags e capa, ou bloqueado até tal hora.
+
+Ela é apagada no fim e fica só um resumo. Funciona no Windows; em terminais sem Unicode, a barra usa `#` e `-`. Se a saída for redirecionada para um arquivo, a barra fica desligada.
+
 ### Modo detalhado: `-v`, `-vv`, `-vvv` (como no nmap)
 
 Funciona no `download`, `update`, `playlist`, `metadata` e `review`. Sem `-v`, a saída é a de sempre.

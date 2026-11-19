@@ -17,6 +17,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import progresso
 import verbose
 from verbose import curto, v, vv, vvv
 from resolvedor_metadados import (
@@ -206,6 +207,7 @@ def aguardar_vez_youtube() -> None:
         falta = alvo - (time.monotonic() - _ULTIMA_CONSULTA_YOUTUBE)
         if falta > 0:
             v("Pausa", f"aguardando {falta:.1f}s antes de consultar o YouTube (pausa sorteada {alvo:.1f}s)")
+            progresso.etapa(f"pausa {falta:.0f}s")
             time.sleep(falta)
         else:
             vv("Pausa", f"pausa de {alvo:.1f}s já cumprida pelo trabalho anterior; sem espera")
@@ -255,6 +257,8 @@ def executar_com_retentativas(url: str, csv_file: str, operacao):
             tentativas += 1
             print(f"{aviso} Nova tentativa {tentativas}/{len(esperas)} em {_minutos(espera)}. "
                   "Pressione Ctrl+C para cancelar (o progresso está salvo).")
+            progresso.etapa("bloqueado; tentando de novo às "
+                            + time.strftime("%H:%M", time.localtime(time.time() + espera)))
             time.sleep(espera)
 
 
@@ -1002,6 +1006,7 @@ def resolver_meta_hibrido(
     campos_obrigatorios = ["title", "artists", "album"]
     if EXIGIR_ISRC:
         campos_obrigatorios.append("isrc")
+    progresso.etapa("identificando artista, álbum e capa")
     resultado = resolver_com_prioridade(
         str(meta.get("id") or ""),
         {} if sem_dados_youtube else meta,
@@ -1056,6 +1061,7 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
                 tags.add(TXXX(encoding=3, desc=desc, text=valores))
 
         v("Tags", f"gravando no MP3: {os.path.basename(audio_path)}")
+        progresso.etapa("gravando tags e capa")
         if verbose.ativo(2):
             for rotulo, valor in (
                 ("título", metadata.get("title")), ("artistas", artistas), ("álbum", metadata.get("album")),
@@ -1322,6 +1328,7 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
         ydl_opts["no_warnings"] = not verbose.ativo(2)  # avisos do yt-dlp a partir do -vv
         aguardar_vez_youtube()
         vv("YouTube", f"yt-dlp: extract_info (sem baixar) {url}")
+        progresso.etapa("lendo metadados no YouTube")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         if not info:
@@ -1388,6 +1395,41 @@ def guardar_info_youtube(url: str, info: dict[str, Any]) -> None:
         return
     while len(INFO_YOUTUBE) > MAX_INFO_YOUTUBE:
         INFO_YOUTUBE.pop(next(iter(INFO_YOUTUBE)))
+
+
+def _tamanho(n: float | None) -> str:
+    if not n:
+        return "?"
+    for unidade in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unidade == "GB":
+            return f"{n:.0f} {unidade}" if unidade in ("B", "KB") else f"{n:.1f} {unidade}"
+        n /= 1024
+    return "?"
+
+
+def _gancho_download(d: dict[str, Any]) -> None:
+    """Progresso do download de cada música, vindo do yt-dlp (para a barra -P)."""
+    if d.get("status") == "downloading":
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        baixado = d.get("downloaded_bytes") or 0
+        if total:
+            progresso.etapa(f"baixando {100 * baixado / total:.0f}% de {_tamanho(total)}")
+        else:
+            progresso.etapa(f"baixando {_tamanho(baixado)}")
+    elif d.get("status") == "finished":
+        progresso.etapa("download concluído")
+
+
+_ETAPAS_POS = {
+    "ExtractAudio": "convertendo para MP3", "EmbedThumbnail": "embutindo a thumbnail",
+    "Metadata": "gravando metadados", "MoveFiles": "movendo arquivo",
+}
+
+
+def _gancho_pos_processamento(d: dict[str, Any]) -> None:
+    if d.get("status") == "started":
+        nome = str(d.get("postprocessor") or "")
+        progresso.etapa(next((t for chave, t in _ETAPAS_POS.items() if chave in nome), "finalizando"))
 
 
 def baixar_reaproveitando(ydl: Any, url: str) -> None:
@@ -1592,6 +1634,8 @@ def baixar_musica(
                 ],
             }
             ydl_opts["sleep_interval_requests"] = PAUSA_ENTRE_REQUISICOES
+            ydl_opts["progress_hooks"] = [_gancho_download]
+            ydl_opts["postprocessor_hooks"] = [_gancho_pos_processamento]
             ydl_opts["verbose"] = verbose.ativo(3)
             ydl_opts["no_warnings"] = not verbose.ativo(2)
             ydl_opts.update(COOKIES_YTDLP)
@@ -1694,7 +1738,26 @@ def meta_do_registro(registro: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def processar_csv(
+def contar_linhas_csv(csv_file: str) -> int:
+    """Quantos vídeos (linhas sem o cabeçalho) o CSV tem; usado no total da barra."""
+    caminho = csv_file if os.path.isabs(csv_file) else os.path.join(BASE_DIR, csv_file)
+    try:
+        with open(caminho, "r", encoding="utf-8-sig", newline="") as arquivo:
+            return max(0, sum(1 for linha in csv.reader(arquivo) if linha) - 1)
+    except OSError:
+        return 0
+
+
+def processar_csv(csv_file: str, append: bool = False, **opcoes: Any) -> bool:
+    """Processa ou retoma um CSV, avisando a barra de progresso (-P) do início e do fim."""
+    progresso.iniciar_csv(os.path.basename(csv_file))
+    continuar = _processar_csv(csv_file, append, **opcoes)
+    if continuar:
+        progresso.fim_csv(contar_linhas_csv(csv_file))
+    return continuar
+
+
+def _processar_csv(
     csv_file: str,
     append: bool = False,
     *,
@@ -1761,6 +1824,7 @@ def processar_csv(
             bloqueado = False
             for row_index, row in enumerate(reader):
                 total_rows = row_index + 1
+                progresso.linha(row_index, row[1] if len(row) > 2 else "")
                 if row_index < start_row:
                     continue  # Já foi checkpointado: não consultar yt-dlp de novo.
 
@@ -2145,6 +2209,8 @@ def executar(args: argparse.Namespace) -> int:
     # Memória da biblioteca: artistas já confirmados ajudam a identificar os próximos.
     ARTISTAS_CONHECIDOS[:] = carregar_artistas_conhecidos(estado)
     CAPAS_BAIXADAS.clear()
+    if getattr(args, "progresso", False):
+        progresso.iniciar(sum(contar_linhas_csv(c) for c in csvs))
     try:
         indice_local = indexar_musicas_locais()
         for csv_file in csvs:
@@ -2160,9 +2226,11 @@ def executar(args: argparse.Namespace) -> int:
                 print("Processamento interrompido por bloqueio temporário; nenhum outro CSV será consultado agora.")
                 break
     except KeyboardInterrupt:
+        progresso.encerrar()
         print("\nInterrompido. O progresso confirmado foi salvo; execute o mesmo comando para retomar.")
         return 130
     finally:
+        progresso.encerrar()
         if MODELO_HIBRIDO:
             try:
                 caminho_pendencias = exportar_metadados_pendentes(estado)
