@@ -520,6 +520,18 @@ def abrir_banco_estado(
         );
         """
     )
+    # Correções de artista feitas no review --answer, para valer nas outras faixas (review --apply).
+    conexao.execute(
+        """CREATE TABLE IF NOT EXISTS music.correcoes_artistas (
+            chave TEXT NOT NULL,
+            de_json TEXT NOT NULL,
+            para_json TEXT NOT NULL,
+            video_key TEXT NOT NULL,
+            canal TEXT NOT NULL DEFAULT '',
+            criada_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chave, video_key)
+        )"""
+    )
     conexao.execute(
         """CREATE TABLE IF NOT EXISTS music.channel_votes (
             channel_key TEXT NOT NULL,

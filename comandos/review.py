@@ -19,12 +19,13 @@ from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, opcoes_
 NOME = "review"
 APELIDOS = ("revisar",)
 RESUMO = "mostra e confirma as faixas do banco SQL direto no terminal"
-OPCOES = ("-a/--answer  -y/--default-ok  -A/--all-fields  -x/--skip CAMPO  --status  -q/--search\n"
-          "-d/--details  --ok ID...  --ok-all  -e/--export  --sql")
+OPCOES = ("-a/--answer  --apply  -y/--default-ok  -A/--all-fields  -x/--skip CAMPO  --status\n"
+          "-q/--search  -d/--details  --ok ID...  --ok-all  -e/--export  --sql")
 EXEMPLOS = """\
   plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)
   plpython.py review --answer             # responde uma por uma; só sai da lista o que ficar resolvido
   plpython.py review --answer --skip album   # não pergunta o álbum
+  plpython.py review --apply              # leva os artistas corrigidos às faixas parecidas
   plpython.py review --answer --default-ok   # Enter = aceita (conflito: banco; vazio: Unknown)
   plpython.py review -d                   # com álbum, arquivo e link do YouTube
   plpython.py review --status all --search snuffles
@@ -65,6 +66,11 @@ def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
                         f"usa o do banco (MusicBrainz); se estiver vazio, vira '{DESCONHECIDO}'")
     r.add_argument("-A", "--all-fields", dest="todos_campos", action="store_true",
                    help="com --answer: pergunta todos os campos, não só os que têm problema")
+    r.add_argument("--apply", dest="aplicar_regras", action="store_true",
+                   help="aplica os artistas que você corrigiu no --answer às outras faixas com o mesmo artista "
+                        "errado, conferindo uma por uma: só aplica se a faixa confirmar (o nome aparece no título "
+                        "ou nos créditos) e identifica de novo com o artista certo; a faixa só sai da lista se "
+                        "ficar completa")
     r.add_argument("-x", "--skip", dest="ignorar", nargs="+", action="extend", default=[], metavar="CAMPO",
                    help="com --answer: não pergunta nem altera estes campos (title, artists, album, isrc; "
                         "ex.: --skip album). Eles continuam pendentes, e as faixas que só têm problema "
@@ -416,7 +422,8 @@ def _legenda(args: argparse.Namespace, ignorar: set[str]) -> list[str]:
 
 
 def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha, salvo: dict, atual: dict,
-          youtube: dict, banco: dict, problemas: list[str], ignorados: list[str]) -> None:
+          youtube: dict, banco: dict, problemas: list[str], ignorados: list[str],
+          adiado: list[str] | None = None) -> None:
     _limpar_tela()
     titulo = f"━━ Revisão · faixa {posicao} de {total} "
     print(_cor(titulo + "━" * max(3, 72 - len(titulo)), "1"))
@@ -444,7 +451,10 @@ def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha,
         if campo == "isrc" and campo not in problemas and not valor:
             continue
         texto = _mostrar(valor)
-        if campo in ignorados:
+        if campo == "artists" and adiado:
+            marca = _cor("→", "1;36")
+            texto += " → " + _cor(_mostrar(adiado), "1;36") + _cor("  (corrigido em outra faixa; vai no --apply)", "2")
+        elif campo in ignorados:
             marca, texto = _cor("–", "2"), texto + _cor("  (ignorado)", "2")
         elif campo in problemas:
             marca, texto = _cor("⚠", "1;33"), _cor(texto, "1")
@@ -461,33 +471,44 @@ def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha,
     print()
 
 
-def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
-               problemas: list[str], conhecidos: list[str] = ()) -> tuple[dict, set[str], str]:
-    """Pergunta campo a campo. Devolve (novos valores, campos marcados como certos, ação)."""
+def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict, problemas: list[str],
+               conhecidos: list[str] = (), sugestao: list[str] | None = None) -> tuple[dict, set[str], str, bool]:
+    """Pergunta campo a campo. Devolve (novos valores, campos marcados como certos, ação,
+    se houve :inv)."""
     import aplicar_metadados
 
     novos: dict = {}
     certos: set[str] = set()
+    invertido = False
     for campo in campos:
         if campo in novos:  # já definido pelo :inv
             continue
         rotulo = NOMES[campo]
         valor_atual = atual.get(campo) or ([] if campo == "artists" else "")
         marca = _cor("⚠", "1;33") if campo in problemas else " "
+        dica = ""
+        if campo == "artists" and sugestao:
+            dica = " (sugestão de outra faixa: " + _cor(_mostrar(sugestao), "36") + " — " + _cor(":sug", "1;36") + ")"
         try:
-            resposta = _ler(f"{marca} {_cor(rotulo, '1')} [{_mostrar(valor_atual)}]: ")
+            resposta = _ler(f"{marca} {_cor(rotulo, '1')} [{_mostrar(valor_atual)}]{dica}: ")
         except (EOFError, KeyboardInterrupt):
             print()
-            return novos, certos, "abortar"
+            return novos, certos, "abortar", invertido
         comando = resposta.casefold()
         if comando in (":q", ":sair"):
-            return novos, certos, "sair"
+            return novos, certos, "sair", invertido
         if comando in (":s", ":pular"):
-            return novos, certos, "pular"
+            return novos, certos, "pular", invertido
         if comando in (":tudo", ":all"):
             certos.update(c for c in campos if c not in novos)
-            return novos, certos, "seguir"
+            return novos, certos, "seguir", invertido
         if not resposta:
+            continue
+        if comando == ":sug":
+            if campo == "artists" and sugestao:
+                novos[campo] = list(sugestao)
+            else:
+                print(_cor("    (não há sugestão para este campo; ele continua pendente)", "2"))
             continue
         if comando in (":inv", ":troca"):
             titulo = str(novos.get("title") or atual.get("title") or "").strip()
@@ -497,6 +518,7 @@ def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
                 continue
             novos["title"] = ", ".join(artistas)
             novos["artists"] = _converter("artists", titulo, conhecidos)
+            invertido = True
             certos.discard("title")
             certos.discard("artists")
             print(_cor(f"    ↔ título: {novos['title']} · artistas: {_mostrar(novos['artists'])}", "36"))
@@ -522,10 +544,10 @@ def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
                 novos[campo] = _pedir_artistas(resposta, list(conhecidos))
             except (EOFError, KeyboardInterrupt):
                 print()
-                return novos, certos, "abortar"
+                return novos, certos, "abortar", invertido
         else:
             novos[campo] = resposta
-    return novos, certos, "seguir"
+    return novos, certos, "seguir", invertido
 
 
 def _aceitar_em_branco(campos: list[str], novos: dict, certos: set[str], atual: dict,
@@ -589,6 +611,11 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
     legenda = _legenda(args, ignorar)
     no_terminal = getattr(sys.stdout, "isatty", lambda: False)()
     conhecidos = pltube.carregar_artistas_conhecidos(conexao)  # para entender "A & B" digitado
+    import correcoes_artistas as ca
+
+    regras_antigas = ca.carregar(conexao)  # correções de revisões anteriores: viram sugestão (:sug)
+    regras_sessao: list = []               # correções desta revisão: o artista vai para o --apply
+    adiadas = 0
     resolvidas = parciais = sem_resposta = puladas_skip = erros = 0
     anterior, acao = "", ""
     for posicao, linha in enumerate(linhas, 1):
@@ -601,19 +628,34 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         problemas = campos_com_problema(resultado)
         ignorados = [c for c in problemas if c in ignorar]
         pendentes = [c for c in problemas if c in PERGUNTAVEIS and c not in ignorar]
+        artistas_atuais = list(atual.get("artists") or [])
+        regra = ca.regra_para(regras_sessao, artistas_atuais)
+        adiar = regra is not None and "artists" in pendentes  # você já corrigiu este artista nesta revisão
+        a_perguntar = [c for c in pendentes if not (adiar and c == "artists")]
         if ignorados and not pendentes and not args.todos_campos:
             puladas_skip += 1  # só tem problema nos campos ignorados
             continue
+        if adiar and not a_perguntar and not args.todos_campos:
+            adiadas += 1
+            anterior = _cor(f"→ {_mostrar(artistas_atuais)} — {atual.get('title') or '?'}: o artista fica para o "
+                            f"--apply ({_mostrar(regra.de)} → {_mostrar(regra.para)})", "36")
+            print(anterior)
+            continue
         if args.todos_campos:
-            perguntar = [c for c in PERGUNTAVEIS if c not in ignorar and (c != "isrc" or "isrc" in problemas)]
+            perguntar = [c for c in PERGUNTAVEIS if c not in ignorar and (c != "isrc" or "isrc" in problemas)
+                         and not (adiar and c == "artists")]
         else:
-            perguntar = pendentes or ["title"]  # sem campo apontado: o título serve de confirmação
+            perguntar = a_perguntar or ["title"]  # sem campo apontado: o título serve de confirmação
+        adiadas += adiar
+        antiga = ca.regra_para(regras_antigas, artistas_atuais) if "artists" in perguntar else None
 
         _tela(posicao=posicao, total=len(linhas), legenda=legenda, anterior=anterior if no_terminal else "",
               linha=linha, salvo=salvo, atual=atual, youtube=youtube, banco=banco,
-              problemas=problemas, ignorados=ignorados)
-        da_faixa = list(youtube["artists"]) + list(banco["artists"]) + list(atual.get("artists") or [])
-        novos, certos, acao = _perguntar(perguntar, atual, youtube, banco, problemas, conhecidos + da_faixa)
+              problemas=problemas, ignorados=ignorados, adiado=regra.para if adiar else None)
+        da_faixa = list(youtube["artists"]) + list(banco["artists"]) + artistas_atuais
+        novos, certos, acao, invertido = _perguntar(perguntar, atual, youtube, banco, problemas,
+                                                    conhecidos + da_faixa, antiga.para if antiga else None)
+        digitados = None if invertido else novos.get("artists")  # antes do --default-ok: só o que você escolheu
         if acao == "abortar":
             print("Saindo; esta faixa não foi alterada. As anteriores já estão salvas.")
             break
@@ -661,8 +703,20 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
             anterior = _cor(f"✓ {rotulo}{detalhe}: saiu da lista", "32")
         else:
             parciais += 1
-            falta = ", ".join(NOMES[c] + (" (ignorado)" if c in ignorados else "") for c in faltam) or "título/artista"
+            falta = ", ".join(NOMES[c] + (" (ignorado)" if c in ignorados else "")
+                              + (" (vai no --apply)" if adiar and c == "artists" else "")
+                              for c in faltam) or "título/artista"
             anterior = _cor(f"◐ {rotulo}{detalhe}: salvo; continua na lista (falta: {falta})", "33")
+        if digitados and ca.registrar(conexao, artistas_atuais, digitados, linha["video_key"],
+                                      str((resultado.get("source_youtube") or {}).get("uploader") or "")):
+            regras_sessao = [r for r in regras_sessao if not ca.mesmos_nomes(r.de, artistas_atuais)]
+            regras_sessao.append(ca.Regra(artistas_atuais, [list(digitados)], [linha["video_key"]]))
+            mesmas = sum(1 for outra in linhas[posicao:]
+                         if ca.mesmos_nomes(json.loads(outra["artists_json"] or "[]"), artistas_atuais))
+            if mesmas:
+                anterior += "\n" + _cor(f"  ↳ correção guardada: {_mostrar(artistas_atuais)} → {_mostrar(digitados)}. "
+                                        f"Nas outras {mesmas} faixa(s) da lista com esse artista ele não será "
+                                        "perguntado; o --apply confere uma por uma.", "36")
         print(anterior)
         if acao == "sair":
             break
@@ -673,10 +727,14 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
               f"{sem_resposta} sem resposta"]
     if puladas_skip:
         partes.append(f"{puladas_skip} puladas por só terem problema no que foi ignorado (--skip)")
+    if adiadas:
+        partes.append(f"{adiadas} com o artista para o --apply")
     if erros:
         partes.append(f"{erros} com erro")
     print("\nResumo: " + ", ".join(partes) + ".")
     print("Tags, banco e M3Us já foram atualizados; o update não desfaz correções manuais.")
+    if adiadas:
+        print(f"Para aplicar os artistas que você corrigiu às outras faixas: python plpython.py review --apply")
     return 1 if erros else 0
 
 
@@ -693,8 +751,14 @@ def executar(args: argparse.Namespace) -> int:
         if (args.default_ok or args.ignorar) and not args.responder:
             print("--default-ok e --skip só valem junto com --answer.", file=sys.stderr)
             return 2
-        if args.responder:
-            return responder(conexao, args)
+        if args.responder or args.aplicar_regras:
+            codigo = responder(conexao, args) if args.responder else 0
+            if args.aplicar_regras:
+                import correcoes_artistas
+
+                print()
+                codigo = correcoes_artistas.aplicar(conexao, args) or codigo
+            return codigo
         if args.ok or args.ok_all:
             return confirmar(conexao, args.ok or [], args.ok_all)
         if args.export:

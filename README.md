@@ -249,6 +249,7 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 python plpython.py review --answer                 # só sai da lista o que ficar todo resolvido
 python plpython.py review --answer --skip album    # não pergunta o álbum
 python plpython.py review --answer --default-ok    # Enter aceita
+python plpython.py review --apply                  # leva os artistas corrigidos às faixas parecidas
 ```
 
 Cada faixa aparece numa tela limpa: a legenda fica sempre no topo e os dados da faixa logo abaixo. As cores ajudam a bater o olho: ⚠ amarelo é campo com problema, ✓ verde está certo, o valor do YouTube vem em ciano e o do banco (MusicBrainz) em magenta.
@@ -290,6 +291,10 @@ O que está errado:
 
 - **Só sai da lista o que ficou resolvido.** A faixa vira `RESOLVIDO` quando todos os campos com ⚠ foram corrigidos ou marcados com `:ok`. Se faltar algum, o que você respondeu é gravado e ela continua `OBSERVAR`; na próxima revisão, só os campos que faltam são perguntados.
 - **Artistas digitados com vírgula, "&", " x " etc.** seguem a [regra de vários artistas](#como-a-música-é-identificada), e o `review` mostra como entendeu antes de gravar ("→ 2 artistas: Anitta | Kevinho"). Enter confirma; para mudar, digite de novo usando `|` para separar ou "aspas" para manter um nome junto.
+- **Uma correção de artista vale para as faixas parecidas.** Ao corrigir o artista de uma faixa ("Canal X" → "Linkin Park"), a correção fica guardada, e nas outras faixas da lista com o mesmo artista errado ele não é mais perguntado (aparece como "→ Linkin Park, vai no --apply"). Depois rode `review --apply`, que passa por elas uma por uma:
+  - só aplica se a própria faixa confirmar: o nome aparece no título do vídeo ou nos créditos, ou são os mesmos nomes com outra grafia/divisão ("TheFatRat & NEFFEX" → "TheFatRat | NEFFEX"). Um canal de re-upload publica vários artistas, então sem confirmação nada muda, e no próximo `review` a correção aparece como sugestão (`:sug`);
+  - se o mesmo artista errado foi corrigido para nomes diferentes, nada é propagado;
+  - aplicada a correção, a faixa é identificada de novo com o artista certo (MusicBrainz: título oficial, álbum, capa), e só sai da lista se ficar completa; senão continua `OBSERVAR`, só com o que falta.
 - **Só os campos com problema (⚠) são perguntados.** Cada motivo aponta um campo: "título diverge" → título; "artista diverge" → artistas; "deduzidos do título/canal" → título e artistas; "álbum não encontrado" → álbum; ISRC → ISRC. Os demais aparecem com ✓. Use `--all-fields` para perguntar todos.
 - **`--skip CAMPO`** (`-x`): não pergunta nem altera esse campo (`title`, `artists`, `album` ou `isrc`; vários: `--skip album isrc`). Ele continua pendente, então a faixa não sai da lista por causa dele, e as faixas que só têm problema nele nem aparecem. `--skip album` também ignora a capa.
 - **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`.
@@ -413,6 +418,7 @@ comandos/                ← um arquivo por comando: opções, ajuda e exemplos
 pltube.py                ← motor do download: YouTube, pastas, M3U, SQL, tags e capa
 resolvedor_metadados.py  ← identificação: canal x artista, hipóteses, MusicBrainz, álbum, capa
 aplicar_metadados.py     ← aplica a planilha de correções
+correcoes_artistas.py    ← correções de artista que valem para outras faixas (review --apply)
 reverter_biblioteca.py   ← conversão do layout antigo songs/_library
 spotify_conta.py         ← login no Spotify e leitura das playlists → spotify.csv
 sincronizar_playlists.py ← spotify.csv × biblioteca → M3Us e nao_baixadas.csv
