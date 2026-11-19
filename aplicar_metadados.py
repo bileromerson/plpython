@@ -122,8 +122,10 @@ def _montar_plano(
         confidence[campo] = "confirmada_manual"
     resultado["provenance"] = provenance
     resultado["confidence"] = confidence
+    anteriores = list((resultado.get("manual_review") or {}).get("fields") or [])
     resultado["manual_review"] = {
-        "fields": list(selecionados),
+        # Revisões anteriores continuam valendo: o update não refaz campos corrigidos à mão.
+        "fields": list(dict.fromkeys(anteriores + selecionados)),
         "confirmed": confirmar,
     }
 

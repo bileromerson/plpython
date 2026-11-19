@@ -41,6 +41,7 @@ O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é 
 | `-a` | `--answer` (review) / `--append` (download, update) | |
 | `-y` | `--default-ok` (review) / `--apply` (metadata, revert, sync) | |
 | `-A` | `--all-fields` | review |
+| `-x` | `--skip` | review |
 | `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review |
 | `-f` | `--sheet` | metadata |
 | `-n` | `--name` | playlist |
@@ -226,37 +227,51 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 ### Responder uma por uma: `review --answer`
 
 ```bash
-python plpython.py review --answer                 # Enter deixa como está; só muda o que você digitar
-python plpython.py review --answer --default-ok    # Enter aceita; a faixa sai da lista
+python plpython.py review --answer                 # só sai da lista o que ficar todo resolvido
+python plpython.py review --answer --skip album    # não pergunta o álbum
+python plpython.py review --answer --default-ok    # Enter aceita
 ```
 
-Para cada faixa `OBSERVAR`/`PENDENTE`, aparece o que está errado e uma pergunta por campo, com o valor atual entre colchetes e as opções do YouTube e do banco (MusicBrainz) quando elas diferem:
+Cada faixa aparece numa tela limpa: a legenda fica sempre no topo e os dados da faixa logo abaixo. As cores ajudam a bater o olho: ⚠ amarelo é campo com problema, ✓ verde está certo, o valor do YouTube vem em ciano e o do banco (MusicBrainz) em magenta.
 
 ```
-[2/12] OBSERVAR  https://youtu.be/aaaaaaaaaaa
-  arquivo: songs/Daft Punk/Get Lucky [aaaaaaaaaaa].mp3
-  O que está errado:
-    • título diverge: YouTube='Get Lucky Remix' / MusicBrainz='Get Lucky'
-    • álbum não encontrado
-  Título [Get Lucky Remix]  (banco: Get Lucky): :db
-  Artistas [Daft Punk]:
-  Álbum [—]  (banco: Random Access Memories): :db
-  ✓ conferida (Título, Álbum): Daft Punk — Get Lucky | Random Access Memories
+━━ Revisão · faixa 2 de 12 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Enter = não mexe (o campo continua pendente)   texto = novo valor   :ok = este campo está certo
+:db = valor do banco   :yt = valor do YouTube   :- = apagar (álbum/ISRC)   vários artistas: A | B
+:tudo = a faixa toda está certa   :s = pular a faixa   :q = salvar e sair
+A faixa só sai da lista quando todos os campos com ⚠ forem corrigidos ou marcados com :ok.
+────────────────────────────────────────────────────────────────────────
+✓ Queen — Bohemian Rhapsody: saiu da lista
+
+[OBSERVAR]  https://youtu.be/aaaaaaaaaaa   songs/Daft Punk/Get Lucky [aaaaaaaaaaa].mp3
+O que está errado:
+  • título diverge: YouTube='Get Lucky Remix' / MusicBrainz='Get Lucky'
+  • álbum não encontrado
+
+  Título    ⚠ Get Lucky Remix    banco: Get Lucky
+  Artistas  ✓ Daft Punk
+  Álbum     ⚠ —    banco: Random Access Memories
+
+⚠ Título [Get Lucky Remix]: :db
+⚠ Álbum [—]:
+◐ Daft Punk — Get Lucky (corrigido: Título): salvo; continua na lista (falta: Álbum)
 ```
 
 | Resposta | Efeito |
 |---|---|
-| Enter | mantém o valor |
-| texto | novo valor (artistas: separe com `|`; o primeiro é o principal) |
+| Enter | não mexe; o campo continua pendente (com `--default-ok`, aceita) |
+| texto | novo valor (vários artistas: separe com `\|`; o primeiro é o principal) |
+| `:ok` | este campo está certo como está (vale também para álbum vazio) |
 | `:db` / `:yt` | usa o valor do banco / do YouTube |
 | `:-` | apaga (álbum ou ISRC) |
-| `:ok` (no título) | está tudo certo como está |
-| `:s` / `:q` (no título) | pula esta faixa / sai (o que já foi respondido fica salvo) |
+| `:tudo` | a faixa inteira está certa |
+| `:s` / `:q` | pula o resto desta faixa / salva o que já respondeu e sai |
 
+- **Só sai da lista o que ficou resolvido.** A faixa vira `RESOLVIDO` quando todos os campos com ⚠ foram corrigidos ou marcados com `:ok`. Se faltar algum, o que você respondeu é gravado e ela continua `OBSERVAR`; na próxima revisão, só os campos que faltam são perguntados.
 - **Só os campos com problema (⚠) são perguntados.** Cada motivo aponta um campo: "título diverge" → título; "artista diverge" → artistas; "deduzidos do título/canal" → título e artistas; "álbum não encontrado" → álbum; ISRC → ISRC. Os demais aparecem com ✓. Use `--all-fields` para perguntar todos.
-- **Sem `--default-ok`:** a faixa que você deixar toda em branco **continua na lista**. Se você mudou algum campo (ou respondeu `:ok`), ela é dada como conferida, e só os campos digitados mudam.
-- **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`. Todas saem da lista.
-- **Cada resposta é gravada na hora**, igual ao `metadata --apply`: tags do MP3 (com backup), banco e M3Us. Se o artista principal mudar, o MP3 vai para a pasta do novo artista, com atalhos para os secundários, e sai de `_observar/`. O `update` não desfaz correções manuais.
+- **`--skip CAMPO`** (`-x`): não pergunta nem altera esse campo (`title`, `artists`, `album` ou `isrc`; vários: `--skip album isrc`). Ele continua pendente, então a faixa não sai da lista por causa dele, e as faixas que só têm problema nele nem aparecem. `--skip album` também ignora a capa.
+- **Com `--default-ok`:** o que ficar em branco é aceito. Se o banco tiver o valor (porque havia conflito com o YouTube ou porque o campo estava vazio), usa o do banco. Se ninguém tiver, vira `Unknown`.
+- **Cada resposta é gravada na hora**, igual ao `metadata --apply`: tags do MP3 (com backup), banco e M3Us. Se o artista principal mudar, o MP3 vai para a pasta do novo artista, com atalhos para os secundários; quando a faixa sai da lista, sai também de `_observar/`. O `update` não desfaz correções manuais.
 - Use `-s`/`-p` se as suas pastas de músicas/playlists não forem `./songs` e `./playlists`.
 
 ### Outras formas

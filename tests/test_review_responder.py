@@ -92,11 +92,35 @@ class ResponderTests(unittest.TestCase):
                          ("Get Lucky", ["Daft Punk"], "Random Access Memories"))
         self.assertEqual(b["status"], "OBSERVAR")  # em branco: continua na lista
         self.assertEqual(b["metadata"]["album"], "")
-        self.assertIn("1 conferida(s)/corrigida(s), 1 mantida(s)", saida)
+        self.assertIn("1 saíram da lista, 0 corrigidas em parte (continuam na lista), 1 sem resposta", saida)
         self.assertFalse(os.path.lexists(os.path.join(self.songs, "_observar", "musica [aaaaaaaaaaa].mp3")))
         self.assertTrue(os.path.lexists(os.path.join(self.songs, "_observar", "musica [bbbbbbbbbbb].mp3")))
         with open(os.path.join("playlists", "lista.m3u"), encoding="utf-8") as m3u:
             self.assertIn("Get Lucky", m3u.read())
+
+    def test_corrigir_so_um_campo_nao_tira_da_lista(self):
+        # A: corrige o título e deixa o álbum em branco → salva o título, continua na lista.
+        codigo, saida = self.responder([":s", ":db", ""])
+        self.assertEqual(codigo, 0, saida)
+        a = self.banco()[0]["aaaaaaaaaaa"]["result"]
+        self.assertEqual(a["status"], "OBSERVAR")
+        self.assertEqual(a["metadata"]["title"], "Get Lucky")
+        self.assertEqual(a["provenance"]["title"], "manual")
+        motivos = " | ".join(a["pending_reasons"] + a["observations"])
+        self.assertNotIn("título diverge", motivos)       # resolvido: sai dos motivos
+        self.assertIn("álbum não encontrado", motivos)    # pendente: continua
+        self.assertNotIn("revisão parcial", motivos)
+        self.assertIn("continua na lista (falta: Álbum)", saida)
+        self.assertTrue(os.path.lexists(os.path.join(self.songs, "_observar", "musica [aaaaaaaaaaa].mp3")))
+
+        # Na próxima revisão só o álbum é perguntado; ":ok" no álbum vazio resolve.
+        codigo, saida = self.responder([":s", ":ok"])
+        self.assertNotIn("⚠ Título [Get Lucky", saida)    # A: título já corrigido, não pergunta de novo
+        self.assertIn("  Título    ✓ Get Lucky", saida)
+        self.assertIn("⚠ Álbum [—]: ", saida)
+        a = self.banco()[0]["aaaaaaaaaaa"]["result"]
+        self.assertEqual((a["status"], a["metadata"]["title"], a["metadata"]["album"]), ("RESOLVIDO", "Get Lucky", ""))
+        self.assertEqual(a["manual_review"]["fields"], ["title", "album"])
 
     def test_trocar_artista_move_o_mp3_e_cria_atalho(self):
         self.responder([":s", "", "Artista Real | Convidado", ""], "--all-fields")
@@ -105,12 +129,13 @@ class ResponderTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(novo) and not os.path.islink(novo))
         self.assertFalse(os.path.exists(self.mp3["aaaaaaaaaaa"]))
         self.assertEqual(resolucoes["aaaaaaaaaaa"]["audio_path"], novo)
+        self.assertEqual(resolucoes["aaaaaaaaaaa"]["result"]["status"], "OBSERVAR")  # título/álbum em branco
         self.assertTrue(os.path.islink(os.path.join(self.songs, "Convidado", "musica [aaaaaaaaaaa].mp3")))
         with open(os.path.join("playlists", "lista.m3u"), encoding="utf-8") as m3u:
             self.assertIn(os.path.join("Artista Real", "musica [aaaaaaaaaaa].mp3"), m3u.read())
 
     def test_default_ok_aceita_branco_usa_banco_no_conflito_e_unknown_no_vazio(self):
-        codigo, saida = self.responder(["", "", "", "", "", ""], "--default-ok")
+        codigo, saida = self.responder(["", "", "", "", ""], "--default-ok")
         self.assertEqual(codigo, 0, saida)
         resolucoes, _ = self.banco()
         a, b = resolucoes["aaaaaaaaaaa"]["result"], resolucoes["bbbbbbbbbbb"]["result"]
@@ -120,21 +145,73 @@ class ResponderTests(unittest.TestCase):
         self.assertEqual(b["metadata"]["album"], "Unknown")  # vazio e sem banco → Unknown
         self.assertEqual(b["metadata"]["artists"], ["Canal Qualquer"])  # tinha valor: mantido
 
-    def test_atalhos_ok_pular_e_sair(self):
+    def test_ok_por_campo_tudo_pular_e_sair(self):
+        # B: ":ok" só no título, depois ":q" → salva o título como certo e sai; continua na lista.
         codigo, saida = self.responder([":ok", ":q"])
         resolucoes, _ = self.banco()
-        self.assertEqual(resolucoes["bbbbbbbbbbb"]["result"]["status"], "RESOLVIDO")  # :ok confirma como está
-        self.assertEqual(resolucoes["bbbbbbbbbbb"]["result"]["metadata"]["title"], "Song")
-        self.assertEqual(resolucoes["aaaaaaaaaaa"]["result"]["status"], "OBSERVAR")  # :q parou antes
+        b = resolucoes["bbbbbbbbbbb"]["result"]
+        self.assertEqual((b["status"], b["metadata"]["title"]), ("OBSERVAR", "Song"))
+        self.assertEqual(b["confidence"]["title"], "confirmada_manual")
+        self.assertEqual(resolucoes["aaaaaaaaaaa"]["result"]["status"], "OBSERVAR")  # nem chegou nela
         self.assertIn("Saindo", saida)
+        # ":tudo" confirma a faixa inteira como está.
+        self.responder([":tudo", ":s"])
+        b = self.banco()[0]["bbbbbbbbbbb"]["result"]
+        self.assertEqual((b["status"], b["metadata"]["title"], b["metadata"]["artists"]),
+                         ("RESOLVIDO", "Song", ["Canal Qualquer"]))
 
-    def test_so_pergunta_os_campos_com_problema(self):
+    def test_so_pergunta_os_campos_com_problema_e_legenda_fica_no_topo(self):
         codigo, saida = self.responder([":s", ":s"])
-        self.assertIn("Campos com problema: Título, Álbum", saida)
-        self.assertIn("Artistas: Daft Punk  ✓", saida)        # A: artista certo, não perguntado
-        self.assertIn("⚠ Título [Get Lucky Remix]", saida)
+        self.assertIn("  Artistas  ✓ Daft Punk", saida)        # A: artista certo, não perguntado
+        self.assertIn("  Título    ⚠ Get Lucky Remix    banco: Get Lucky", saida)
+        self.assertIn("⚠ Título [Get Lucky Remix]: ", saida)
         self.assertNotIn("Artistas [Daft Punk]", saida)
-        self.assertIn("Campos com problema: Título, Artistas, Álbum", saida)  # B: deduzida
+        self.assertIn("  Artistas  ⚠ Canal Qualquer", saida)    # B: deduzida
+        # A legenda vem antes de cada faixa, e os dados logo abaixo.
+        self.assertEqual(saida.count(":tudo = a faixa toda está certa"), 2)
+        self.assertLess(saida.index("faixa 1 de 2"), saida.index("https://youtu.be/bbbbbbbbbbb"))
+        self.assertLess(saida.index("faixa 2 de 2"), saida.index("https://youtu.be/aaaaaaaaaaa"))
+
+    def test_skip_album_nao_pergunta_nem_tira_da_lista(self):
+        db = pltube.abrir_banco_estado(os.path.join("sql", "downloads.sqlite3"), os.path.join("sql", "musicas.sqlite3"))
+        caminho = os.path.join(self.songs, "Zeca", "so album [ccccccccccc].mp3")
+        os.makedirs(os.path.dirname(caminho))
+        with open(caminho, "wb") as f:
+            f.write(b"mp3")
+        pltube.salvar_resolucao(db, "youtube:ccccccccccc", resolucao(
+            "ccccccccccc", "OBSERVAR", "Só Álbum", ["Zeca"], "", ["álbum não encontrado"], {"title": "Só Álbum"}),
+            caminho)
+        db.commit()
+        db.close()
+        # B: título e artistas certos (:ok); A: título pelo banco. Álbum ignorado nas duas; C nem aparece.
+        codigo, saida = self.responder([":ok", ":ok", ":db"], "--skip", "album")
+        self.assertEqual(codigo, 0, saida)
+        self.assertNotIn("⚠ Álbum", saida)
+        self.assertNotIn("ccccccccccc", saida)
+        self.assertIn("Ignorando nesta revisão (--skip): Álbum", saida)
+        self.assertIn("falta: Álbum (ignorado)", saida)
+        self.assertIn("1 puladas por só terem problema no que foi ignorado", saida)
+        resolucoes, _ = self.banco()
+        a, b = resolucoes["aaaaaaaaaaa"]["result"], resolucoes["bbbbbbbbbbb"]["result"]
+        self.assertEqual((a["status"], a["metadata"]["title"], a["metadata"]["album"]), ("OBSERVAR", "Get Lucky", ""))
+        self.assertEqual(b["status"], "OBSERVAR")
+        # Da próxima vez, com --skip album, nenhuma das três aparece (só falta o álbum).
+        codigo, saida = self.responder([], "-x", "album")
+        self.assertIn("3 puladas", saida)
+
+    def test_skip_campo_desconhecido(self):
+        with contextlib.redirect_stderr(io.StringIO()) as erro:
+            self.assertEqual(plpython.main(["review", "-a", "-x", "letra"]), 2)
+        self.assertIn("campo desconhecido", erro.getvalue())
+
+    def test_cores_so_no_terminal(self):
+        with patch.dict(os.environ, {"FORCE_COLOR": "1"}):
+            _, colorido = self.responder([":s", ":s"])
+        self.assertIn("\033[1;33m⚠\033[0m", colorido)
+        self.assertIn("\033[1;33m[OBSERVAR]\033[0m", colorido)
+        self.assertIn("\033[35mbanco: Get Lucky\033[0m", colorido)
+        _, simples = self.responder([":s", ":s"])
+        self.assertNotIn("\033[", simples)
 
     def test_mapa_de_motivos_para_campos(self):
         from comandos.review import campos_com_problema

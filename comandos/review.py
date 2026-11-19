@@ -18,11 +18,12 @@ from comandos._comum import ativar_verbose, opcoes_verbose, novo_parser, opcoes_
 NOME = "review"
 APELIDOS = ("revisar",)
 RESUMO = "mostra e confirma as faixas do banco SQL direto no terminal"
-OPCOES = ("-a/--answer  -y/--default-ok  -A/--all-fields  --status  -q/--search  -d/--details\n"
-          "--ok ID...  --ok-all  -e/--export  --sql")
+OPCOES = ("-a/--answer  -y/--default-ok  -A/--all-fields  -x/--skip CAMPO  --status  -q/--search\n"
+          "-d/--details  --ok ID...  --ok-all  -e/--export  --sql")
 EXEMPLOS = """\
   plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)
-  plpython.py review --answer             # responde uma por uma (Enter = deixa na lista)
+  plpython.py review --answer             # responde uma por uma; só sai da lista o que ficar resolvido
+  plpython.py review --answer --skip album   # não pergunta o álbum
   plpython.py review --answer --default-ok   # Enter = aceita (conflito: banco; vazio: Unknown)
   plpython.py review -d                   # com álbum, arquivo e link do YouTube
   plpython.py review --status all --search snuffles
@@ -55,14 +56,18 @@ def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
     p.add_argument("--sql", metavar="SELECT", help="executa uma consulta SQL somente leitura")
     r = p.add_argument_group("responder (corrigir uma por uma)")
     r.add_argument("-a", "--answer", dest="responder", action="store_true",
-                   help="percorre as faixas para conferir, mostra o que está errado e pergunta cada campo; "
-                        "Enter mantém o valor. Só muda o que você digitar; quem ficar todo em branco "
-                        "continua na lista")
+                   help="percorre as faixas para conferir, mostra o que está errado e pergunta cada campo "
+                        "com problema. Só grava o que você alterar ou marcar com :ok; a faixa só sai da "
+                        "lista quando todos os campos com problema estiverem resolvidos")
     r.add_argument("-y", "--default-ok", dest="default_ok", action="store_true",
                    help="com --answer: o que ficar em branco é aceito; se YouTube e banco discordarem, "
-                        f"usa o do banco (MusicBrainz); se estiver vazio, vira '{DESCONHECIDO}'. A faixa sai da lista")
+                        f"usa o do banco (MusicBrainz); se estiver vazio, vira '{DESCONHECIDO}'")
     r.add_argument("-A", "--all-fields", dest="todos_campos", action="store_true",
                    help="com --answer: pergunta todos os campos, não só os que têm problema")
+    r.add_argument("-x", "--skip", dest="ignorar", nargs="+", action="extend", default=[], metavar="CAMPO",
+                   help="com --answer: não pergunta nem altera estes campos (title, artists, album, isrc; "
+                        "ex.: --skip album). Eles continuam pendentes, e as faixas que só têm problema "
+                        "neles nem aparecem"),
     r.add_argument("-s", "--songs-dir", dest="songs_dir", default="songs", metavar="PASTA",
                    help="pasta das músicas (padrão: ./songs)")
     r.add_argument("-p", "--playlist-dir", dest="playlist_dir", default="playlists", metavar="PASTA",
@@ -119,7 +124,7 @@ def listar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         print("Nenhuma faixa encontrada com esse filtro.")
         return 0
     for linha in linhas:
-        print(f"[{linha['metadata_status']}] {linha['video_id']}  "
+        print(f"{_status(linha['metadata_status'])} {linha['video_id']}  "
               f"{_artistas(linha['artists_json']) or '?'} — {linha['title'] or '?'}")
         if args.detalhes:
             if linha["album"]:
@@ -223,13 +228,40 @@ def exportar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 CAMPOS = (("title", "Título"), ("artists", "Artistas"), ("album", "Álbum"), ("isrc", "ISRC"))
-AJUDA_RESPOSTA = (
-    "Só os campos com problema (⚠) são perguntados (--all-fields pergunta todos).\n"
-    "Responda: Enter = mantém | texto = novo valor | :db = valor do banco (MusicBrainz) | "
-    ":yt = valor do YouTube | :- = apagar (álbum/ISRC)\n"
-    "Na 1ª pergunta de cada faixa: :ok = está tudo certo | :s = pular | :q = sair. "
-    "Vários artistas: separe com |  (o primeiro é o principal)."
-)
+NOMES = dict(CAMPOS, cover="Capa")
+PERGUNTAVEIS = ("title", "artists", "album", "isrc")  # a capa vem com o álbum; não se digita
+APELIDOS_CAMPOS = {
+    "title": "title", "titulo": "title", "título": "title",
+    "artist": "artists", "artists": "artists", "artista": "artists", "artistas": "artists",
+    "album": "album", "álbum": "album", "isrc": "isrc", "cover": "cover", "capa": "cover",
+}
+COR_STATUS = {"RESOLVIDO": "1;32", "OBSERVAR": "1;33", "PENDENTE": "1;31"}
+
+
+def _cor(texto: str, codigo: str) -> str:
+    from verbose import colorir
+
+    return colorir(texto, codigo)
+
+
+def _status(status: str) -> str:
+    return _cor(f"[{status}]", COR_STATUS.get(status, "1"))
+
+
+def campos_ignorados(valores: list[str] | None) -> set[str]:
+    """--skip album,isrc  ou  --skip album isrc  →  {"album", "cover", "isrc"}."""
+    campos: set[str] = set()
+    for valor in valores or []:
+        for parte in str(valor).split(","):
+            if not parte.strip():
+                continue
+            campo = APELIDOS_CAMPOS.get(parte.strip().casefold())
+            if not campo:
+                raise ValueError(f"campo desconhecido em --skip: {parte.strip()} (use title, artists, album ou isrc)")
+            campos.add(campo)
+    if "album" in campos:
+        campos.add("cover")  # sem álbum não há capa para conferir
+    return campos
 
 
 def _mostrar(valor) -> str:
@@ -279,14 +311,41 @@ _MOTIVO_CAMPOS = (
     ("ausente: title", ("title",)),
     ("capa", ("cover",)),
 )
+_REVISAO_PARCIAL = "revisão parcial"
+
+
+def _campos_do_motivo(motivo: str) -> set[str]:
+    texto = motivo.casefold()
+    return {campo for chave, campos in _MOTIVO_CAMPOS if chave in texto for campo in campos}
+
+
+def _confirmados(resultado: dict) -> set[str]:
+    """Campos que você já corrigiu ou marcou como certos (em qualquer revisão)."""
+    campos = {c for c, valor in (resultado.get("confidence") or {}).items() if valor == "confirmada_manual"}
+    if "album" in campos:
+        campos.add("cover")
+    return campos
 
 
 def campos_com_problema(resultado: dict) -> list[str]:
-    """Quais campos os motivos de conferência apontam (na ordem título, artistas, álbum, ISRC, capa)."""
-    motivos = " | ".join((resultado.get("pending_reasons") or []) + (resultado.get("observations") or []))
-    motivos = motivos.casefold()
-    achados = {campo for chave, campos in _MOTIVO_CAMPOS if chave in motivos for campo in campos}
+    """Campos apontados pelos motivos de conferência e ainda não conferidos à mão
+    (na ordem título, artistas, álbum, ISRC, capa)."""
+    motivos = (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
+    achados = {campo for motivo in motivos for campo in _campos_do_motivo(motivo)} - _confirmados(resultado)
     return [c for c in ("title", "artists", "album", "isrc", "cover") if c in achados]
+
+
+def _podar_motivos(resultado: dict) -> None:
+    """Revisão parcial: tira os motivos cujos campos já foram resolvidos; ficam só os que faltam."""
+    confirmados = _confirmados(resultado)
+    for chave in ("pending_reasons", "observations"):
+        restantes = []
+        for motivo in resultado.get(chave) or []:
+            campos = _campos_do_motivo(motivo)
+            if _REVISAO_PARCIAL in motivo.casefold() or (campos and campos <= confirmados):
+                continue
+            restantes.append(motivo)
+        resultado[chave] = restantes
 
 
 def _ler(pergunta: str) -> str:
@@ -299,9 +358,181 @@ def _converter(campo: str, texto: str):
     return texto
 
 
+def _limpar_tela() -> None:
+    """Num terminal, cada faixa começa numa tela limpa (com a legenda no topo)."""
+    if not getattr(sys.stdout, "isatty", lambda: False)() or os.environ.get("TERM") == "dumb":
+        print()
+        return
+    import verbose
+
+    if os.name == "nt" and not verbose._habilitar_ansi_windows():
+        os.system("cls")
+    else:
+        print("\033[H\033[2J", end="", flush=True)
+
+
+def _legenda(args: argparse.Namespace, ignorar: set[str]) -> list[str]:
+    def k(comando: str) -> str:
+        return _cor(comando, "1;36")
+
+    enter = ("Enter = aceita (conflito: valor do banco; vazio: Unknown)" if args.default_ok
+             else "Enter = não mexe (o campo continua pendente)")
+    linhas = [
+        f"{enter}   texto = novo valor   {k(':ok')} = este campo está certo",
+        f"{k(':db')} = valor do banco   {k(':yt')} = valor do YouTube   {k(':-')} = apagar (álbum/ISRC)"
+        f"   vários artistas: A {k('|')} B",
+        f"{k(':tudo')} = a faixa toda está certa   {k(':s')} = pular a faixa   {k(':q')} = salvar e sair",
+        "A faixa só sai da lista quando todos os campos com " + _cor("⚠", "1;33")
+        + " forem corrigidos ou marcados com :ok.",
+    ]
+    if ignorar - {"cover"}:
+        nomes = ", ".join(NOMES[c] for c in PERGUNTAVEIS if c in ignorar)
+        linhas.append(_cor(f"Ignorando nesta revisão (--skip): {nomes}. Esses campos não são perguntados "
+                           "nem alterados e continuam pendentes.", "2"))
+    return linhas
+
+
+def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha, salvo: dict, atual: dict,
+          youtube: dict, banco: dict, problemas: list[str], ignorados: list[str]) -> None:
+    _limpar_tela()
+    titulo = f"━━ Revisão · faixa {posicao} de {total} "
+    print(_cor(titulo + "━" * max(3, 72 - len(titulo)), "1"))
+    for texto in legenda:
+        print(texto)
+    print(_cor("─" * 72, "2"))
+    if anterior:
+        print(anterior)
+    caminho = salvo.get("audio_path") or ""
+    if caminho:
+        try:
+            caminho = os.path.relpath(caminho)
+        except ValueError:  # outro disco no Windows
+            pass
+    print(f"\n{_status(linha['metadata_status'])}  https://youtu.be/{linha['video_id']}"
+          + (f"   {caminho}" if caminho else ""))
+    resultado = salvo["result"]
+    motivos = (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
+    print("O que está errado:")
+    for motivo in motivos or ["(sem motivo registrado)"]:
+        print(f"  {_cor('•', '33')} {motivo}")
+    print()
+    for campo, rotulo in CAMPOS:
+        valor = atual.get(campo)
+        if campo == "isrc" and campo not in problemas and not valor:
+            continue
+        texto = _mostrar(valor)
+        if campo in ignorados:
+            marca, texto = _cor("–", "2"), texto + _cor("  (ignorado)", "2")
+        elif campo in problemas:
+            marca, texto = _cor("⚠", "1;33"), _cor(texto, "1")
+        else:
+            marca = _cor("✓", "32")
+        fontes = []
+        if youtube[campo] and not _iguais(campo, youtube[campo], valor):
+            fontes.append(_cor(f"YouTube: {_mostrar(youtube[campo])}", "36"))
+        if banco[campo] and not _iguais(campo, banco[campo], valor):
+            fontes.append(_cor(f"banco: {_mostrar(banco[campo])}", "35"))
+        print(f"  {rotulo:<9} {marca} {texto}" + ("    " + "   ".join(fontes) if fontes else ""))
+    if "cover" in problemas and "cover" not in ignorados:
+        print(_cor("  Capa      vem com o álbum: com o álbum certo, o update busca a capa", "2"))
+    print()
+
+
+def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict,
+               problemas: list[str]) -> tuple[dict, set[str], str]:
+    """Pergunta campo a campo. Devolve (novos valores, campos marcados como certos, ação)."""
+    import aplicar_metadados
+
+    novos: dict = {}
+    certos: set[str] = set()
+    for campo in campos:
+        rotulo = NOMES[campo]
+        valor_atual = atual.get(campo) or ([] if campo == "artists" else "")
+        marca = _cor("⚠", "1;33") if campo in problemas else " "
+        try:
+            resposta = _ler(f"{marca} {_cor(rotulo, '1')} [{_mostrar(valor_atual)}]: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return novos, certos, "abortar"
+        comando = resposta.casefold()
+        if comando in (":q", ":sair"):
+            return novos, certos, "sair"
+        if comando in (":s", ":pular"):
+            return novos, certos, "pular"
+        if comando in (":tudo", ":all"):
+            certos.update(c for c in campos if c not in novos)
+            return novos, certos, "seguir"
+        if not resposta:
+            continue
+        if comando == ":ok":
+            certos.add(campo)
+        elif comando in (":db", ":yt"):
+            fonte = banco if comando == ":db" else youtube
+            if fonte[campo]:
+                novos[campo] = fonte[campo]
+            else:
+                print(_cor(f"    ({'o banco' if comando == ':db' else 'o YouTube'} não tem esse valor; "
+                           "o campo continua pendente)", "2"))
+        elif comando == ":-":
+            if campo in ("album", "isrc"):
+                novos[campo] = aplicar_metadados.LIMPAR
+            else:
+                print(_cor("    (só álbum e ISRC podem ser apagados; o campo continua pendente)", "2"))
+        elif resposta.startswith(":"):
+            print(_cor(f"    (comando desconhecido: {resposta}; o campo continua pendente)", "2"))
+        else:
+            novos[campo] = _converter(campo, resposta)
+    return novos, certos, "seguir"
+
+
+def _aceitar_em_branco(campos: list[str], novos: dict, certos: set[str], atual: dict,
+                       youtube: dict, banco: dict) -> None:
+    """--default-ok: o que ficou em branco é aceito. Conflito, ou vazio com valor no banco → banco;
+    vazio sem banco → Unknown; o resto fica como está, marcado como certo."""
+    for campo in campos:
+        if campo in novos or campo in certos:
+            continue
+        valor_atual = atual.get(campo)
+        conflito = youtube[campo] and not _iguais(campo, youtube[campo], banco[campo])
+        if campo != "isrc" and banco[campo] and (not valor_atual or conflito) \
+                and not _iguais(campo, banco[campo], valor_atual):
+            novos[campo] = banco[campo]
+        elif campo != "isrc" and not valor_atual:
+            novos[campo] = [DESCONHECIDO] if campo == "artists" else DESCONHECIDO
+        else:
+            certos.add(campo)
+
+
+def _registro(video_key: str, atual: dict, novos: dict, certos: set[str], confirmar: bool) -> dict:
+    """Linha no formato da planilha de revisão, só com os campos tratados."""
+    import aplicar_metadados
+
+    registro = {"video_key": video_key, "arquivo_audio": "", "aplicar": "sim",
+                "confirmar_manual": "sim" if confirmar else ""}
+    colunas = {"title": ("usar_titulo", "titulo_final"), "artists": ("usar_artistas", "artistas_finais"),
+               "album": ("usar_album", "album_final"), "isrc": ("usar_isrc", "isrc_final")}
+    for campo in PERGUNTAVEIS:
+        if campo not in novos and campo not in certos:
+            continue
+        valor = novos[campo] if campo in novos else atual.get(campo)
+        texto = " | ".join(valor or []) if campo == "artists" else str(valor or "")
+        if not texto.strip():
+            if campo in ("title", "artists"):
+                continue  # vazio não confirma título/artista
+            texto = aplicar_metadados.LIMPAR  # "sem álbum/ISRC" também é uma resposta
+        uso, coluna = colunas[campo]
+        registro[uso], registro[coluna] = "sim", texto
+    return registro
+
+
 def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
     import aplicar_metadados
 
+    try:
+        ignorar = campos_ignorados(getattr(args, "ignorar", None))
+    except ValueError as exc:
+        print(f"Erro: {exc}", file=sys.stderr)
+        return 2
     pasta_musicas = os.path.abspath(args.songs_dir)
     pasta_playlists = os.path.abspath(args.playlist_dir)
     pltube.SONGS_DIR, pltube.PLAYLISTS_DIR = pasta_musicas, pasta_playlists
@@ -312,10 +543,10 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
     if not linhas:
         print("Nenhuma faixa para conferir.")
         return 0
-    print(AJUDA_RESPOSTA)
-    if args.default_ok:
-        print(f"--default-ok: em branco = aceito; conflito YouTube x banco = banco; vazio = {DESCONHECIDO}.")
-    corrigidas = mantidas = erros = 0
+    legenda = _legenda(args, ignorar)
+    no_terminal = getattr(sys.stdout, "isatty", lambda: False)()
+    resolvidas = parciais = sem_resposta = puladas_skip = erros = 0
+    anterior, acao = "", ""
     for posicao, linha in enumerate(linhas, 1):
         salvo = pltube.carregar_resolucao(conexao, linha["video_key"])
         if not salvo:
@@ -323,110 +554,83 @@ def responder(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         resultado = salvo["result"]
         atual = dict(resultado.get("metadata") or {})
         youtube, banco = _fontes(resultado)
-        print(f"\n[{posicao}/{len(linhas)}] {linha['metadata_status']}  https://youtu.be/{linha['video_id']}")
-        if salvo.get("audio_path"):
-            print(f"  arquivo: {os.path.relpath(salvo['audio_path'])}")
-        motivos = (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
-        print("  O que está errado:")
-        for motivo in motivos or ["(sem motivo registrado)"]:
-            print(f"    • {motivo}")
-
         problemas = campos_com_problema(resultado)
-        nomes = dict(CAMPOS, cover="Capa")
-        if problemas:
-            print("  Campos com problema: " + ", ".join(nomes[c] for c in problemas))
-        if "cover" in problemas and len(problemas) == 1 or problemas == ["album", "cover"]:
-            print("  (a capa vem junto com o álbum: com o álbum certo, o `update` busca a capa)")
+        ignorados = [c for c in problemas if c in ignorar]
+        pendentes = [c for c in problemas if c in PERGUNTAVEIS and c not in ignorar]
+        if ignorados and not pendentes and not args.todos_campos:
+            puladas_skip += 1  # só tem problema nos campos ignorados
+            continue
         if args.todos_campos:
-            campos = [c for c in CAMPOS if c[0] != "isrc" or "isrc" in problemas]
+            perguntar = [c for c in PERGUNTAVEIS if c not in ignorar and (c != "isrc" or "isrc" in problemas)]
         else:
-            campos = [c for c in CAMPOS if c[0] in problemas] or [CAMPOS[0]]
-            for campo, rotulo in CAMPOS:
-                if campo not in problemas and campo != "isrc" and (campo, rotulo) not in campos:
-                    print(f"  {rotulo}: {_mostrar(atual.get(campo))}  ✓")
-        novos: dict = {}
-        confirmar_tudo = pular = sair = False
-        for campo, rotulo in campos:
-            valor_atual = atual.get(campo) or ([] if campo == "artists" else "")
-            opcoes = []
-            if youtube[campo] and not _iguais(campo, youtube[campo], valor_atual):
-                opcoes.append(f"YouTube: {_mostrar(youtube[campo])}")
-            if banco[campo] and not _iguais(campo, banco[campo], valor_atual):
-                opcoes.append(f"banco: {_mostrar(banco[campo])}")
-            extra = f"  ({'; '.join(opcoes)})" if opcoes else ""
-            marca = "⚠ " if campo in problemas else ""
-            try:
-                resposta = _ler(f"  {marca}{rotulo} [{_mostrar(valor_atual)}]{extra}: ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                sair = True
-                break
-            comando = resposta.casefold()
-            if (campo, rotulo) == campos[0] and comando in (":ok", ":s", ":q", ":pular", ":sair"):
-                confirmar_tudo, pular, sair = comando == ":ok", comando in (":s", ":pular"), comando in (":q", ":sair")
-                break
-            if not resposta:
-                continue
-            if comando == ":db":
-                if not banco[campo]:
-                    print("    (o banco não tem esse valor; mantido)")
-                    continue
-                novos[campo] = banco[campo]
-            elif comando == ":yt":
-                if not youtube[campo]:
-                    print("    (o YouTube não tem esse valor; mantido)")
-                    continue
-                novos[campo] = youtube[campo]
-            elif comando == ":-":
-                if campo not in ("album", "isrc"):
-                    print("    (só álbum e ISRC podem ser apagados; mantido)")
-                    continue
-                novos[campo] = aplicar_metadados.LIMPAR
-            else:
-                novos[campo] = _converter(campo, resposta)
-        if sair:
-            print("Saindo. O que já foi respondido está salvo.")
+            perguntar = pendentes or ["title"]  # sem campo apontado: o título serve de confirmação
+
+        _tela(posicao=posicao, total=len(linhas), legenda=legenda, anterior=anterior if no_terminal else "",
+              linha=linha, salvo=salvo, atual=atual, youtube=youtube, banco=banco,
+              problemas=problemas, ignorados=ignorados)
+        novos, certos, acao = _perguntar(perguntar, atual, youtube, banco, problemas)
+        if acao == "abortar":
+            print("Saindo; esta faixa não foi alterada. As anteriores já estão salvas.")
             break
-        if pular or (not novos and not confirmar_tudo and not args.default_ok):
-            mantidas += 1
-            print("  → mantida na lista")
+        if acao == "seguir" and args.default_ok:
+            _aceitar_em_branco(perguntar, novos, certos, atual, youtube, banco)
+
+        rotulo = f"{_mostrar(novos.get('artists') or atual.get('artists'))} — {novos.get('title') or atual.get('title') or '?'}"
+        tratados = set(novos) | certos
+        faltam = [c for c in pendentes if c not in tratados] + ignorados
+        if not tratados:
+            sem_resposta += 1
+            anterior = _cor(f"· {rotulo}: sem resposta; continua na lista", "2")
+            print(anterior)
+            if acao == "sair":
+                break
             continue
 
-        if args.default_ok:
-            # O que ficou em branco: conflito ou vazio com valor no banco → banco; vazio sem banco → Unknown.
-            for campo, _ in CAMPOS:
-                if campo in novos or campo == "isrc" or (campo not in problemas and not args.todos_campos):
-                    continue
-                valor_atual = atual.get(campo)
-                conflito = youtube[campo] and not _iguais(campo, youtube[campo], banco[campo])
-                if banco[campo] and (not valor_atual or conflito) and not _iguais(campo, banco[campo], valor_atual):
-                    novos[campo] = banco[campo]  # o banco tem: usa o do banco
-                elif not valor_atual:
-                    novos[campo] = [DESCONHECIDO] if campo == "artists" else DESCONHECIDO
-
-        registro = {"video_key": linha["video_key"], "arquivo_audio": "", "aplicar": "sim", "confirmar_manual": "sim"}
-        for campo, coluna_uso, coluna_valor in (("title", "usar_titulo", "titulo_final"),
-                                                ("artists", "usar_artistas", "artistas_finais"),
-                                                ("album", "usar_album", "album_final"),
-                                                ("isrc", "usar_isrc", "isrc_final")):
-            if campo in novos:
-                registro[coluna_uso] = "sim"
-                registro[coluna_valor] = " | ".join(novos[campo]) if campo == "artists" else novos[campo]
+        confirmar = not faltam
+        titulo_final = novos.get("title") or atual.get("title")
+        artistas_finais = novos.get("artists") or atual.get("artists")
+        if confirmar and not (str(titulo_final or "").strip() and artistas_finais):
+            confirmar = False  # sem título/artista não dá para tirar da lista
         try:
-            plano = aplicar_metadados._montar_plano(registro, conexao, pasta_musicas)
+            plano = aplicar_metadados._montar_plano(
+                _registro(linha["video_key"], atual, novos, certos, confirmar), conexao, pasta_musicas)
+            if not confirmar:
+                _podar_motivos(plano["result"])
             aplicar_metadados._aplicar_plano(conexao, plano, pasta_playlists)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - mostra e segue para a próxima
             erros += 1
-            print(f"  ✗ não foi possível gravar: {exc}")
+            anterior = _cor(f"✗ {rotulo}: não foi possível gravar: {exc}", "1;31")
+            print(anterior)
+            if acao == "sair":
+                break
             continue
-        corrigidas += 1
-        meta = plano["result"]["metadata"]
-        mudou = ", ".join(rotulo for campo, rotulo in CAMPOS if campo in novos) or "nada alterado"
-        print(f"  ✓ conferida ({mudou}): {_mostrar(meta.get('artists'))} — {meta.get('title')}"
-              f"{' | ' + meta['album'] if meta.get('album') else ''}")
 
-    print(f"\nResumo: {corrigidas} conferida(s)/corrigida(s), {mantidas} mantida(s) na lista"
-          + (f", {erros} com erro" if erros else "") + ".")
+        meta = plano["result"]["metadata"]
+        rotulo = f"{_mostrar(meta.get('artists'))} — {meta.get('title')}"
+        mudou = ", ".join(NOMES[c] for c in PERGUNTAVEIS if c in novos)
+        certo = ", ".join(NOMES[c] for c in PERGUNTAVEIS if c in certos and c not in novos)
+        detalhe = "; ".join(filter(None, (f"corrigido: {mudou}" if mudou else "", f"certo: {certo}" if certo else "")))
+        detalhe = f" ({detalhe})" if detalhe else ""
+        if confirmar:
+            resolvidas += 1
+            anterior = _cor(f"✓ {rotulo}{detalhe}: saiu da lista", "32")
+        else:
+            parciais += 1
+            falta = ", ".join(NOMES[c] + (" (ignorado)" if c in ignorados else "") for c in faltam) or "título/artista"
+            anterior = _cor(f"◐ {rotulo}{detalhe}: salvo; continua na lista (falta: {falta})", "33")
+        print(anterior)
+        if acao == "sair":
+            break
+
+    if acao == "sair":
+        print("Saindo. O que já foi respondido está salvo.")
+    partes = [f"{resolvidas} saíram da lista", f"{parciais} corrigidas em parte (continuam na lista)",
+              f"{sem_resposta} sem resposta"]
+    if puladas_skip:
+        partes.append(f"{puladas_skip} puladas por só terem problema no que foi ignorado (--skip)")
+    if erros:
+        partes.append(f"{erros} com erro")
+    print("\nResumo: " + ", ".join(partes) + ".")
     print("Tags, banco e M3Us já foram atualizados; o update não desfaz correções manuais.")
     return 1 if erros else 0
 
@@ -441,8 +645,8 @@ def executar(args: argparse.Namespace) -> int:
     try:
         if args.sql:
             return consulta_sql(conexao, args.sql)
-        if args.default_ok and not args.responder:
-            print("--default-ok só vale junto com --answer.", file=sys.stderr)
+        if (args.default_ok or args.ignorar) and not args.responder:
+            print("--default-ok e --skip só valem junto com --answer.", file=sys.stderr)
             return 2
         if args.responder:
             return responder(conexao, args)
