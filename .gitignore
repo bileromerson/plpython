@@ -215,3 +215,7 @@ pltube_state.sqlite3-wal
 pltube_state.sqlite3-shm
 metadados_pendentes.csv
 .metadados-pendentes-*.csv
+
+# Cookies da conta do Google (dão acesso à conta; nunca enviar ao Git)
+cookies*.txt
+*cookies*.txt

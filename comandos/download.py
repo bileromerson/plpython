@@ -9,14 +9,16 @@ from __future__ import annotations
 import argparse
 import os
 
-from comandos._comum import novo_parser, oculto, opcoes_bancos, opcoes_pastas, traduzir_ajuda
+from comandos._comum import (
+    cookies_ytdlp, novo_parser, oculto, opcoes_bancos, opcoes_conta, opcoes_pastas, traduzir_ajuda,
+)
 
 NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
 OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  --no-artist-links\n"
           "--wait-on-limit  --sleep  --retry  --no-hybrid  --prefer-db  --review  --no-review\n"
-          "--require-isrc  --require-mb-artist")
+          "--require-isrc  --require-mb-artist  --cookies-from-browser  --cookies")
 EXEMPLOS = """\
   plpython.py download -c ./csvs                      # identifica artista, álbum e capa
   plpython.py download -c ./csvs/Alone.csv            # só uma playlist
@@ -25,7 +27,8 @@ EXEMPLOS = """\
   plpython.py download -c ./csvs --prefer-db          # MusicBrainz vence divergências
   plpython.py download -c ./csvs --review diff        # só pede conferência de divergências
   plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube
-  plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa"""
+  plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa
+  plpython.py download -c ./csvs --cookies-from-browser firefox  # com a sua conta do Google"""
 
 
 def _pausa(valor: str) -> tuple[float, float]:
@@ -94,6 +97,7 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     oculto(p, "--exigir-isrc", dest="exigir_isrc", action="store_true")
     oculto(p, "--exigir-artista-musicbrainz", dest="exigir_artista_musicbrainz", action="store_true")
 
+    opcoes_conta(p)
     g = opcoes_bancos(p)
     g.add_argument("--legacy-db", dest="legacy_state_file", default="pltube_state.sqlite3", metavar="ARQ",
                    help="banco antigo único a migrar se existir (padrão: ./pltube_state.sqlite3)")
@@ -127,6 +131,7 @@ def executar(args: argparse.Namespace, *, update: bool = False) -> int:
     if usa_opcao_hibrida and not args.modelo_hibrido:
         print("Aviso: --no-hybrid ignora --prefer-db/--review/--require-*.")
     args.state_file = args.downloads_db
+    args.cookies_ytdlp = cookies_ytdlp(args)
     return pltube.executar(args)
 
 

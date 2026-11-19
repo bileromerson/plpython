@@ -13,6 +13,7 @@ O `plpython.py` é só o menu: sozinho, ele mostra os comandos e as opções pri
 ```
 plpython.py              ← menu: lista os comandos e encaminha
 comandos/
+├── playlist.py          ← importa playlists do YouTube (sua conta) para CSV
 ├── download.py          ← tudo do download
 ├── update.py            ← usa as opções do download e sempre tenta de novo
 ├── metadata.py
@@ -27,6 +28,7 @@ A lógica pesada continua em `pltube.py`, `aplicar_metadados.py` etc., que os ar
 
 | Comando | Faz | Antes era |
 |---|---|---|
+| `playlist` (`importar`) | cria CSVs das suas playlists do YouTube (privadas, curtidas, assistir mais tarde) | novo |
 | `download` (`baixar`) | baixa os CSVs e gera as M3Us | `pltube.py` |
 | `update` (`atualizar`) | relê os CSVs, refaz falhas e pendências sem rebaixar o que já existe | `pltube.py --reprocess` |
 | `metadata` (`metadados`) | aplica a planilha `metadados_pendentes.csv` (simula sem `--apply`) | `aplicar_metadados.py` |
@@ -147,6 +149,27 @@ Assim, os próximos vídeos do mesmo canal ou artista saem resolvidos. No `updat
 | `--review diff` | marca só divergências |
 | `--no-review` | não marca nada (as notas ficam guardadas no banco) |
 | `--no-hybrid` | desliga a identificação (mais rápido, só YouTube) |
+
+### Sua conta do Google: playlists privadas, curtidas e vídeos restritos
+
+O YouTube não aceita mais login por senha nem OAuth no yt-dlp. O único jeito suportado é usar os **cookies** da sua conta já logada. O programa nunca vê nem pede sua senha.
+
+```bash
+# 1. Crie os CSVs a partir da conta (todas as suas playlists, curtidas ou assistir mais tarde)
+python plpython.py playlist mine --cookies-from-browser firefox
+python plpython.py playlist liked --cookies-from-browser firefox
+python plpython.py playlist watch-later --cookies-from-browser firefox
+python plpython.py playlist "https://www.youtube.com/playlist?list=PL..." --name Rock
+
+# 2. Baixe usando a mesma conta (libera vídeos +18, privados compartilhados com você etc.)
+python plpython.py download -c csvs --cookies-from-browser firefox
+```
+
+- **Navegador:** use o **Firefox**. No Windows, Chrome/Edge/Brave (versão 127 ou mais nova) usam uma criptografia que o yt-dlp não consegue ler, e dá o erro "Failed to decrypt with DPAPI". Faça login no YouTube pelo Firefox uma vez e use `--cookies-from-browser firefox`. Para escolher um perfil: `firefox:NomeDoPerfil`.
+- **Alternativa:** um arquivo `cookies.txt`, com `--cookies cookies.txt`. A wiki do yt-dlp explica como exportar sem que ele expire: entre numa janela anônima, abra `youtube.com/robots.txt`, exporte e feche a janela. O arquivo dá acesso à sua conta; o `.gitignore` já impede que ele vá para o Git.
+- **Para não repetir a opção:** defina a variável `PLPYTHON_COOKIES_FROM_BROWSER=firefox` (ou `PLPYTHON_COOKIES=caminho/cookies.txt`).
+- **Atualizar uma playlist:** rodar `playlist` de novo atualiza o CSV. O `download` só baixa os vídeos novos. Vídeos apagados ou privados ficam fora do CSV (`--include-unavailable` mantém).
+- **Risco:** segundo a wiki do yt-dlp, usar a conta com o yt-dlp pode fazer o YouTube **bloqueá-la temporária ou permanentemente**. Use só quando precisar, mantenha a pausa entre vídeos ou use uma conta secundária. Com conta, o limite sobe de cerca de 300 para cerca de 2000 vídeos por hora.
 
 ### Consultas ao YouTube e bloqueios
 

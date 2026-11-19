@@ -62,13 +62,16 @@ PAUSA_ENTRE_REQUISICOES = 0.75  # dentro de uma mesma consulta (preset "-t sleep
 _ULTIMA_CONSULTA_YOUTUBE: float | None = None
 # Metadados já lidos nesta execução: o download reaproveita em vez de consultar de novo.
 INFO_YOUTUBE: dict[str, dict[str, Any]] = {}
+# Conta do Google (cookies) para o yt-dlp: {"cookiesfrombrowser": (...)} ou {"cookiefile": ...}
+COOKIES_YTDLP: dict[str, Any] = {}
+_DICA_LOGIN_MOSTRADA = False
 MAX_INFO_YOUTUBE = 50
 
 
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
-    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC, PAUSA_YOUTUBE
+    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC, PAUSA_YOUTUBE, COOKIES_YTDLP
     global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR
 
     caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
@@ -96,6 +99,7 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     EXIGIR_ISRC = args.exigir_isrc
     EXIGIR_ARTISTA_MUSICBRAINZ = args.exigir_artista_musicbrainz
     PREFERIR = getattr(args, "preferir", None) or "youtube"
+    COOKIES_YTDLP = dict(getattr(args, "cookies_ytdlp", None) or {})
     pausa = getattr(args, "pausa", None)
     if pausa is not None:
         PAUSA_YOUTUBE = tuple(pausa)
@@ -167,6 +171,27 @@ def _minutos(segundos: float) -> str:
     return f"{segundos / 60:.0f} min" if segundos >= 60 else f"{segundos:.0f} s"
 
 
+_SINAIS_LOGIN = (
+    "sign in to confirm your age", "age-restricted", "private video", "members-only",
+    "join this channel", "login required", "requires authentication", "cookies",
+)
+
+
+def dica_login(mensagem: str) -> None:
+    """Uma vez por execução, avisa que o vídeo exige uma conta logada."""
+    global _DICA_LOGIN_MOSTRADA
+    texto = mensagem.casefold().replace("’", "'")
+    if _DICA_LOGIN_MOSTRADA or not any(sinal in texto for sinal in _SINAIS_LOGIN):
+        return
+    _DICA_LOGIN_MOSTRADA = True
+    if COOKIES_YTDLP:
+        print("Este vídeo exige login e a conta usada não tem acesso (ou os cookies expiraram; "
+              "exporte de novo).")
+    else:
+        print("Este vídeo exige uma conta logada (privado, +18 ou só para membros). "
+              "Rode com --cookies-from-browser firefox para usar a sua conta do Google.")
+
+
 def aguardar_vez_youtube() -> None:
     """Espaça as consultas ao YouTube (5-10 s por padrão), descontando o tempo
     que já passou desde a última, para não chegar ao limite da sessão."""
@@ -192,6 +217,7 @@ def executar_com_retentativas(url: str, csv_file: str, operacao):
             tipo = tipo_bloqueio(mensagem)
             registrar_erro(url, mensagem, csv_file)
             if not tipo:
+                dica_login(mensagem)
                 return None
 
             if tipo == "sessao":
@@ -1248,6 +1274,7 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
             "ignoreerrors": False,
             "noplaylist": True,
             "sleep_interval_requests": PAUSA_ENTRE_REQUISICOES,
+            **COOKIES_YTDLP,
         }
         if ESPERAR_BLOQUEIO:
             # Deixa o backoff do programa controlar as novas tentativas em vez
@@ -1499,6 +1526,7 @@ def baixar_musica(
                 ],
             }
             ydl_opts["sleep_interval_requests"] = PAUSA_ENTRE_REQUISICOES
+            ydl_opts.update(COOKIES_YTDLP)
             if ESPERAR_BLOQUEIO:
                 ydl_opts.update({"retries": 0, "extractor_retries": 0, "fragment_retries": 0})
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -2042,6 +2070,10 @@ def executar(args: argparse.Namespace) -> int:
         print(f"Não foi possível abrir o banco de progresso {state_path}: {exc}")
         return 1
 
+    if COOKIES_YTDLP:
+        origem = COOKIES_YTDLP.get("cookiefile") or "navegador " + COOKIES_YTDLP["cookiesfrombrowser"][0]
+        print(f"Usando a conta do Google ({origem}). Limite maior (~2000 vídeos/h), mas o YouTube "
+              "pode bloquear a conta por uso automatizado: use com moderação.")
     # Memória da biblioteca: artistas já confirmados ajudam a identificar os próximos.
     ARTISTAS_CONHECIDOS[:] = carregar_artistas_conhecidos(estado)
     CAPAS_BAIXADAS.clear()
