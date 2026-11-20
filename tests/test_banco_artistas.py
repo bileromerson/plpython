@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import banco_artistas as ba
 import pltube
-import resolvedor_metadados as r
+import identificar_musica as im
 
 
 class BancoArtistasTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class IntegracaoTests(unittest.TestCase):
             for i, nomes in enumerate((["WHSPRS"], ["WHSPRS"], ["Whsprs"])):
                 valores = {c: "" for c in cols}
                 valores.update(video_key=f"youtube:aaaaaaaaaa{i}", artists_json=json.dumps(nomes),
-                               metadata_status="RESOLVIDO")
+                               metadata_status="RESOLVIDO", provenance_json='{"artists": "youtube_music"}')
                 con.execute(f"INSERT INTO music.music_tracks ({','.join(valores)}) VALUES "
                             f"({','.join('?' * len(valores))})", list(valores.values()))
             conhecidos = pltube.carregar_artistas_conhecidos(con)
@@ -82,9 +82,9 @@ class IntegracaoTests(unittest.TestCase):
             con.close()
 
     def test_variacao_do_banco_acha_artista_no_titulo(self):
-        h = r.hipoteses_youtube({"title": "Liberdade Provisória - H e J - com cifras", "uploader": "x"},
-                                None, ["Henrique & Juliano", "H e J"])[0]
-        self.assertEqual((h["title"], h["artists"]), ("Liberdade Provisória", ["H e J"]))
+        r = im.identificar({"id": "x", "title": "Liberdade Provisória - H e J - com cifras", "uploader": "x"},
+                           conhecidos=["Henrique & Juliano", "H e J"])
+        self.assertEqual((r["metadata"]["title"], r["metadata"]["artists"]), ("Liberdade Provisória", ["H e J"]))
 
 
 if __name__ == "__main__":

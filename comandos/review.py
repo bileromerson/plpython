@@ -26,7 +26,7 @@ EXEMPLOS = """\
   plpython.py review --answer             # responde uma por uma; só sai da lista o que ficar resolvido
   plpython.py review --answer --skip album   # não pergunta o álbum
   plpython.py review --apply              # leva os artistas corrigidos às faixas parecidas
-  plpython.py review --answer --default-ok   # Enter = aceita (conflito: banco; vazio: Unknown)
+  plpython.py review --answer --default-ok   # Enter = aceita (conflito: YouTube Music; vazio: Unknown)
   plpython.py review -d                   # com álbum, arquivo e link do YouTube
   plpython.py review --status all --search snuffles
   plpython.py review --ok UG1HUOyL9IA njowoGhmw6E
@@ -62,8 +62,8 @@ def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
                         "com problema. Só grava o que você alterar ou marcar com :ok; a faixa só sai da "
                         "lista quando todos os campos com problema estiverem resolvidos")
     r.add_argument("-y", "--default-ok", dest="default_ok", action="store_true",
-                   help="com --answer: o que ficar em branco é aceito; se YouTube e banco discordarem, "
-                        f"usa o do banco (MusicBrainz); se estiver vazio, vira '{DESCONHECIDO}'")
+                   help="com --answer: o que ficar em branco é aceito; se o vídeo e o YouTube Music "
+                        f"discordarem, usa o do YouTube Music; se estiver vazio, vira '{DESCONHECIDO}'")
     r.add_argument("-A", "--all-fields", dest="todos_campos", action="store_true",
                    help="com --answer: pergunta todos os campos, não só os que têm problema")
     r.add_argument("--apply", dest="aplicar_regras", action="store_true",
@@ -178,7 +178,7 @@ def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool)
         resultado = salvo["result"]
         metadata = resultado.get("metadata") or {}
         if not metadata.get("title") or not metadata.get("artists"):
-            print(f"{video_id}: sem título/artista; corrija pela planilha (plpython.py metadata).")
+            print(f"{video_id}: sem título/artista; corrija com: plpython.py review --answer")
             erros += 1
             continue
         resultado["status"] = "RESOLVIDO"
@@ -284,14 +284,15 @@ def _mostrar(valor) -> str:
 
 
 def _iguais(campo: str, a, b) -> bool:
-    import resolvedor_metadados as r
+    import textos as r
     if campo == "artists":
         return (not a and not b) or bool(a and b and r._mesmos_artistas(list(a), list(b)))
     return r._normalize_text(str(a or "")) == r._normalize_text(str(b or ""))
 
 
 def _fontes(resultado: dict) -> tuple[dict, dict]:
-    """Valores do YouTube e do banco (MusicBrainz) para oferecer como opção."""
+    """Valores do vídeo no YouTube e do catálogo (YouTube Music, ou MusicBrainz em faixas
+    antigas) para oferecer como opção."""
     yt = resultado.get("source_youtube") or {}
     youtube = {
         "title": yt.get("title") or yt.get("video_title") or "",
@@ -324,6 +325,10 @@ _MOTIVO_CAMPOS = (
     ("ausente: title", ("title",)),
     ("capa", ("cover",)),
     ("invertid", ("title", "artists")),
+    ("artista parece", ("artists",)),
+    ("título com sobras", ("title",)),
+    ("título contém", ("title",)),
+    ("vídeo longo", ("title", "artists")),
 )
 _REVISAO_PARCIAL = "revisão parcial"
 
@@ -368,7 +373,7 @@ def _ler(pergunta: str) -> str:
 
 def _converter(campo: str, texto: str, conhecidos: list[str] | tuple = ()):
     if campo == "artists":
-        import resolvedor_metadados as r
+        import textos as r
 
         return r.dividir_artistas(texto, conhecidos) or [p.strip() for p in texto.split("|") if p.strip()]
     return texto
@@ -408,12 +413,12 @@ def _legenda(args: argparse.Namespace, ignorar: set[str]) -> list[str]:
     def k(comando: str) -> str:
         return _cor(comando, "1;36")
 
-    enter = ("Enter = aceita (conflito: valor do banco; vazio: Unknown)" if args.default_ok
+    enter = ("Enter = aceita (conflito: valor do YouTube Music; vazio: Unknown)" if args.default_ok
              else "Enter = não mexe (o campo continua pendente)")
     aspas = k('"aspas"')
     linhas = [
         f"{enter}   texto = novo valor   {k(':ok')} = este campo está certo",
-        f"{k(':db')} = valor do banco   {k(':yt')} = valor do YouTube   {k(':-')} = apagar (álbum/ISRC)"
+        f"{k(':db')} = valor do YouTube Music   {k(':yt')} = valor do vídeo   {k(':-')} = apagar (álbum/ISRC)"
         f"   {k(':inv')} = troca título e artista",
         f"{k(':tudo')} = a faixa toda está certa   {k(':s')} = pular a faixa   {k(':q')} = salvar e sair",
         f"Vários artistas: A {k('|')} B (vírgula e & também valem; {aspas} mantêm um nome junto)",
@@ -470,7 +475,7 @@ def _tela(*, posicao: int, total: int, legenda: list[str], anterior: str, linha,
         if youtube[campo] and not _iguais(campo, youtube[campo], valor):
             fontes.append(_cor(f"YouTube: {_mostrar(youtube[campo])}", "36"))
         if banco[campo] and not _iguais(campo, banco[campo], valor):
-            fontes.append(_cor(f"banco: {_mostrar(banco[campo])}", "35"))
+            fontes.append(_cor(f"YT Music: {_mostrar(banco[campo])}", "35"))
         print(f"  {rotulo:<9} {marca} {texto}" + ("    " + "   ".join(fontes) if fontes else ""))
     if "cover" in problemas and "cover" not in ignorados:
         print(_cor("  Capa      vem com o álbum: com o álbum certo, o update busca a capa", "2"))
@@ -536,7 +541,7 @@ def _perguntar(campos: list[str], atual: dict, youtube: dict, banco: dict, probl
             if fonte[campo]:
                 novos[campo] = fonte[campo]
             else:
-                print(_cor(f"    ({'o banco' if comando == ':db' else 'o YouTube'} não tem esse valor; "
+                print(_cor(f"    ({'o YouTube Music' if comando == ':db' else 'o vídeo'} não tem esse valor; "
                            "o campo continua pendente)", "2"))
         elif comando == ":-":
             if campo in ("album", "isrc"):

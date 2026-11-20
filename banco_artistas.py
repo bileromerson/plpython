@@ -25,7 +25,7 @@ ESQUEMA = "artistas"
 
 def chave(nome: Any) -> str:
     """Nome comparável: sem acento, caixa, pontuação nem espaço ("AC/DC" = "acdc")."""
-    from resolvedor_metadados import _normalize_text
+    from textos import _normalize_text
 
     return _normalize_text(str(nome or "")).replace(" ", "")
 
@@ -258,20 +258,30 @@ def remover(conexao: sqlite3.Connection, nome: str) -> str:
     return "artista removido (com as variações)"
 
 
+# Só entra no banco artista que veio de fonte confiável ou de correção sua: um artista
+# deduzido do título que estava errado não pode virar "conhecido".
+FONTES_CONFIAVEIS = {
+    "youtube_music", "youtube_music_descricao", "youtube_music_clipe", "youtube_creditos",
+    "youtube_music_busca", "manual", "manual_regra", "banco_isrc", "musicbrainz", "youtube_validado_musicbrainz",
+}
+
+
 def importar_biblioteca(conexao: sqlite3.Connection) -> int:
-    """Traz os artistas das faixas já confirmadas (RESOLVIDO) do banco de músicas."""
+    """Traz os artistas das faixas confirmadas (RESOLVIDO, de fonte confiável) do banco de músicas."""
     if not _tem_tabela(conexao, "music", "music_tracks"):
         return 0
     from collections import Counter
 
     antes = conexao.execute(f"SELECT COUNT(*) FROM {ESQUEMA}.artistas").fetchone()[0]
     grafias: Counter[str] = Counter()
-    for (artistas_json,) in conexao.execute(
-        "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'RESOLVIDO'"
+    for artistas_json, provenance_json in conexao.execute(
+        "SELECT artists_json, provenance_json FROM music.music_tracks WHERE metadata_status = 'RESOLVIDO'"
     ).fetchall():
         try:
+            if (json.loads(provenance_json or "{}") or {}).get("artists") not in FONTES_CONFIAVEIS:
+                continue
             grafias.update(str(n).strip() for n in json.loads(artistas_json or "[]") if str(n).strip())
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
             continue
     # "WHSPRS" (3 faixas) e "Whsprs" (1): fica a grafia mais usada
     for nome, _ in sorted(grafias.items(), key=lambda i: (-i[1], i[0].isupper() or i[0].islower(), i[0])):
@@ -287,7 +297,7 @@ def vazio(conexao: sqlite3.Connection) -> bool:
 def parecidos(conexao: sqlite3.Connection) -> list[tuple[Artista, Artista]]:
     """Pares que podem ser o mesmo artista escrito diferente ("Henrique e Juliano" e
     "Henrique & Juliano"), para juntar com `artists alias`."""
-    from resolvedor_metadados import _normalize_text, _similarity
+    from textos import _normalize_text, _similarity
 
     artistas = listar(conexao)
     pares = []

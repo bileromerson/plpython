@@ -14,7 +14,7 @@ class PlpythonCliTests(unittest.TestCase):
     def test_download_com_varios_csvs_e_opcoes(self):
         args = self._capturar("pltube", [
             "download", "a.csv", "b.csv", "-c", "base", "-u", "-1",
-            "--wait-on-limit", "--require-isrc",
+            "--wait-on-limit", "--ask",
         ])
         self.assertEqual(args.lista, [os.path.abspath("a.csv"), os.path.abspath("b.csv")])
         self.assertEqual(args.base_dir, "base")
@@ -24,14 +24,14 @@ class PlpythonCliTests(unittest.TestCase):
         self.assertTrue(args.modelo_hibrido)  # identificação ligada por padrão
         self.assertFalse(args.reprocess)
 
-    def test_prioridades_de_metadados(self):
-        args = self._capturar("pltube", ["download", "--prefer-db", "--no-review"])
-        self.assertEqual((args.preferir, args.revisar), ("musicbrainz", "none"))
+    def test_o_que_vai_para_conferencia(self):
+        args = self._capturar("pltube", ["download", "--no-review"])
+        self.assertEqual(args.revisar, "none")
         self.assertTrue(args.modelo_hibrido)
         args = self._capturar("pltube", ["download"])
-        self.assertEqual((args.preferir, args.revisar), ("youtube", "all"))
-        args = self._capturar("pltube", ["download", "--review", "diff"])
-        self.assertEqual(args.revisar, "diff")
+        self.assertEqual(args.revisar, "errors")
+        args = self._capturar("pltube", ["download", "--review", "all"])
+        self.assertEqual(args.revisar, "all")
 
     def test_csv_dir_nao_muda_pasta_de_trabalho(self):
         import tempfile
@@ -75,7 +75,7 @@ class PlpythonCliTests(unittest.TestCase):
         with contextlib.redirect_stdout(saida):
             self.assertEqual(plpython.main(["help"]), 0)
             self.assertEqual(plpython.main([]), 2)
-        for comando in ("download", "update", "metadata", "review", "spotify", "revert"):
+        for comando in ("download", "update", "review", "check", "artists", "spotify", "sync"):
             self.assertIn(comando, saida.getvalue())
         with contextlib.redirect_stdout(io.StringIO()) as ajuda, self.assertRaises(SystemExit):
             plpython.main(["help", "download"])
@@ -87,14 +87,9 @@ class PlpythonCliTests(unittest.TestCase):
         self.assertEqual(args.lista, [])
 
 
-    def test_metadata_simula_por_padrao(self):
-        args = self._capturar("aplicar_metadados", ["metadata", "--sheet", "r.csv"])
-        self.assertFalse(args.apply)
-        self.assertEqual(args.arquivo, "r.csv")
-
-    def test_revert_e_spotify(self):
-        args = self._capturar("reverter_biblioteca", ["revert", "-s", "m", "--apply"])
-        self.assertEqual((args.root, args.apply), ("m", True))
+    def test_check_artists_spotify_e_sync(self):
+        args = self._capturar("comandos.check", ["check", "-y"])
+        self.assertTrue(args.apply)
         args = self._capturar("spotify_conta", ["spotify", "abc", "-L", "-o", "x.csv"])
         self.assertEqual((args.playlists, args.liked, args.output), (["abc"], True, "x.csv"))
         args = self._capturar("sincronizar_playlists", ["sync", "Rock", "-y", "--keep-extra"])

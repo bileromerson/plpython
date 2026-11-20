@@ -11,9 +11,10 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # helpers dos outros testes
 
 import correcoes_artistas as ca
+import identificar_musica as im
 import plpython
 import pltube
-from test_modelo_identificacao import FakeMB, UUID, gravacao, release
+from ytm_falso import YTMFalso, faixa
 
 DEDUZIDOS = "não confirmado no MusicBrainz; título/artista deduzidos do nome do canal (confiança 40%)"
 
@@ -57,10 +58,10 @@ class CorrecoesTests(unittest.TestCase):
                        "VALUES ('lista.csv', ?, ?, ?, ?, 200, ?)", (indice, f"youtube:{vid}", titulo, artistas[0], caminho))
         db.commit()
         db.close()
-        mb = FakeMB([gravacao("In the End", ["Linkin Park"], [release(20, "Hybrid Theory", artistas=["Linkin Park"])], n=20)],
-                    capas={UUID.format(520): "https://c/hybrid.jpg"})
-        for alvo, valor in (("aplicar_tags_hibridas", lambda *a, **k: True), ("MUSICBRAINZ_CLIENT", mb),
-                            ("PREFERIR", pltube.PREFERIR), ("ARTISTAS_CONHECIDOS", []), ("RESOLVER_CACHE", {})):
+        ytm = im.ClienteYTMusic(YTMFalso(catalogo=[faixa("zzzzzzzzzzz", "In the End", ["Linkin Park"],
+                                                          album="Hybrid Theory")]), pausa=0)
+        for alvo, valor in (("aplicar_tags_hibridas", lambda *a, **k: True), ("YTMUSIC", ytm),
+                            ("ARTISTAS_CONHECIDOS", [])):
             patcher = patch.object(pltube, alvo, valor)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -97,7 +98,8 @@ class CorrecoesTests(unittest.TestCase):
         self.assertEqual(saida.count("⚠ Artistas [TheFatRat & NEFFEX]"), 1)
         self.assertIn("correção guardada: Canal X → Linkin Park. Nas outras 3 faixa(s)", saida)
         self.assertIn("Canal X → Linkin Park  (corrigido em outra faixa; vai no --apply)", saida)
-        self.assertIn("4 com o artista para o --apply", saida)
+        # "TheFatRat & NEFFEX" → "TheFatRat | NEFFEX" não é correção: " & " já separa os dois
+        self.assertIn("3 com o artista para o --apply", saida)
         self.assertIn("python plpython.py review --apply", saida)
         self.assertEqual(self.faixa("aaaaaaaaaaa")["status"], "RESOLVIDO")
         self.assertEqual(self.faixa("bbbbbbbbbbb")["metadata"]["artists"], ["Canal X"])  # nada aplicado ainda
@@ -112,10 +114,9 @@ class CorrecoesTests(unittest.TestCase):
         for vid in ("ccccccccccc", "ddddddddddd"):  # nada confirma: o canal publica vários artistas
             self.assertEqual(self.faixa(vid)["metadata"]["artists"], ["Canal X"])
         self.assertIn("✗ Canal X — Thunder: não apliquei Canal X → Linkin Park: nada nesta faixa confirma", saida)
-        nunca = self.faixa("fffffffffff")  # mesmos nomes, só separados: aplica; sem álbum continua na lista
-        self.assertEqual((nunca["metadata"]["artists"], nunca["status"]), (["TheFatRat", "NEFFEX"], "OBSERVAR"))
-        self.assertIn("continua na lista (falta: Álbum)", saida)
-        self.assertIn("Resumo: 1 saíram da lista, 1 corrigidas em parte (continuam na lista), 2 não confirmadas", saida)
+        nunca = self.faixa("fffffffffff")  # só separar os nomes não gera regra: fica para o update/artists fix
+        self.assertEqual(nunca["metadata"]["artists"], ["TheFatRat & NEFFEX"])
+        self.assertIn("Resumo: 1 saíram da lista, 0 corrigidas em parte (continuam na lista), 2 não confirmadas", saida)
 
         # No próximo review, as não confirmadas mostram a correção como sugestão.
         saida = self.rodar(["review", "-a", "-q", "Numb"], [":ok", ":sug"])

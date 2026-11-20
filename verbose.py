@@ -1,13 +1,12 @@
 """Modo detalhado no estilo do nmap: -v, -vv e -vvv.
 
   -v    o que acontece em cada música: erros que normalmente só iriam para o
-        Logs.txt, consultas ao SQL, ao YouTube e ao MusicBrainz, se os dados do
-        YouTube e do banco batem ou divergem (e qual preferência foi aplicada),
-        pausas, arquivos movidos e o resumo do que foi gravado no MP3.
-  -vv   tudo do -v e mais: cada hipótese de artista/título com a confiança, os
-        motivos da avaliação do canal, os candidatos do MusicBrainz com nota,
-        os metadados lidos do YouTube campo a campo, cada tag gravada no MP3,
-        requisições HTTP ao MusicBrainz, avisos do yt-dlp e o tempo decorrido.
+        Logs.txt, consultas ao SQL e ao YouTube, de onde veio o artista (YouTube
+        Music, créditos, título/canal), os sinais de erro, pausas, arquivos
+        movidos e o resumo do que foi gravado no MP3.
+  -vv   tudo do -v e mais: o que a busca no YouTube Music devolveu, os metadados
+        lidos do YouTube campo a campo, cada tag gravada no MP3, avisos do
+        yt-dlp e o tempo decorrido.
   -vvv  tudo do -vv e mais a saída de depuração do próprio yt-dlp.
 
 Cores: só num terminal de verdade (saída redirecionada para arquivo fica sem
@@ -33,7 +32,8 @@ _CORES_AREA = {
     "Erro": "1;31",          # vermelho forte
     "Resultado": "1",        # negrito; o status ganha a cor dele
     "Comparação": "1;35",    # magenta forte
-    "MusicBrainz": "35",     # magenta
+    "YouTube Music": "35",   # magenta
+    "Identificação": "1;35",
     "YouTube": "36",         # ciano
     "Modelo": "94",          # azul claro
     "SQL": "34",             # azul

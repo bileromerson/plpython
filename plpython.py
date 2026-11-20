@@ -3,13 +3,14 @@
 Este arquivo não baixa nem altera nada. Ele só mostra os comandos disponíveis
 e encaminha cada um para o seu próprio arquivo na pasta `comandos/`:
 
+  plpython.py playlist ...  ->  comandos/playlist.py
   plpython.py download ...  ->  comandos/download.py
   plpython.py update ...    ->  comandos/update.py
-  plpython.py metadata ...  ->  comandos/metadata.py
   plpython.py review ...    ->  comandos/review.py
+  plpython.py check ...     ->  comandos/check.py
+  plpython.py artists ...   ->  comandos/artists.py
   plpython.py spotify ...   ->  comandos/spotify.py
-  plpython.py revert ...    ->  comandos/revert.py
-  plpython.py playlist ...  ->  comandos/playlist.py
+  plpython.py sync ...      ->  comandos/sync.py
 
 Todas as opções, validações e a ajuda de cada comando ficam no arquivo dele.
 """
@@ -61,11 +62,10 @@ def mostrar_menu(arquivo=None) -> None:
         "  plpython.py help download        (ou: plpython.py download -h)",
         "",
         "exemplos:",
-        "  python plpython.py download -c ./csvs --hybrid",
+        "  python plpython.py download -c ./csvs -P",
         "  python plpython.py update -c ./csvs --wait-on-limit",
-        "  python plpython.py review",
-        "  python plpython.py review --ok-all",
-        "  python plpython.py metadata --apply",
+        "  python plpython.py check -y",
+        "  python plpython.py review --answer",
         "  python plpython.py spotify && python plpython.py sync -y",
         "",
         "Os arquivos (songs/, playlists/, sql/) são criados na pasta de onde você roda o comando.",

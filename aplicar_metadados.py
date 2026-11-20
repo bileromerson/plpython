@@ -1,13 +1,14 @@
-"""Aplica revisões manuais da planilha metadados_pendentes.csv.
+"""Grava uma correção de metadados numa faixa: tags do MP3, banco, pasta do artista e M3U.
 
-Por segurança, apenas simula por padrão. Use --apply para gravar as tags e o
-estado local. Não consulta YouTube nem MusicBrainz e não baixa áudio.
+Usado pelo `review --answer`, pelo `review --apply`, pelo `check -y` e pelo `artists fix`.
+Uma correção é descrita como um registro com campos "usar_*"/"*_final" (título, artistas,
+álbum, ISRC) e "confirmar_manual"; `_montar_plano` monta o resultado novo e
+`_aplicar_plano` grava tudo, voltando o MP3 ao original se algo falhar.
+Não consulta a internet e não baixa áudio.
 """
 
 from __future__ import annotations
 
-import argparse
-import csv
 import json
 import os
 import re
@@ -23,10 +24,6 @@ LIMPAR = "__LIMPAR__"
 
 def _verdadeiro(valor: str | None) -> bool:
     return str(valor or "").strip().casefold() in SIM
-
-
-def _caminho(base: str, valor: str) -> str:
-    return os.path.abspath(valor if os.path.isabs(valor) else os.path.join(base, valor))
 
 
 def _artistas(valor: str) -> list[str]:
@@ -259,120 +256,3 @@ def _reorganizar_arquivo(conexao, plano: dict[str, Any]) -> None:
         pltube.criar_link_artista(novo, artista)
     if resultado.get("status") == "RESOLVIDO":
         pltube.limpar_atalhos_conferencia(novo)
-
-
-def aplicar_revisoes(
-    arquivo_csv: str,
-    arquivo_estado: str,
-    pasta_musicas: str,
-    pasta_playlists: str,
-    *,
-    arquivo_metadados: str | None = None,
-    aplicar: bool = False,
-) -> dict[str, int]:
-    """Simula ou aplica somente linhas/campos explicitamente selecionados."""
-    if not os.path.isfile(arquivo_csv):
-        raise FileNotFoundError(f"CSV de revisão não encontrado: {arquivo_csv}")
-    if not os.path.isfile(arquivo_estado):
-        raise FileNotFoundError(
-            f"Banco SQLite não encontrado: {arquivo_estado}. Rode na mesma pasta do download (ou use --downloads-db)."
-        )
-    os.makedirs(pasta_playlists, exist_ok=True)
-    pltube.SONGS_DIR = os.path.abspath(pasta_musicas)
-    pltube.PLAYLISTS_DIR = os.path.abspath(pasta_playlists)
-    pltube.BASE_DIR = os.path.dirname(os.path.abspath(arquivo_csv))
-    pltube.LOG_FILE = os.path.join(pltube.BASE_DIR, "Logs.txt")
-
-    with open(arquivo_csv, "r", encoding="utf-8-sig", newline="") as arquivo:
-        reader = csv.DictReader(arquivo)
-        obrigatorias = {
-            "video_key", "arquivo_audio", "aplicar", "usar_titulo", "titulo_final",
-            "usar_artistas", "artistas_finais", "usar_album", "album_final",
-            "usar_isrc", "isrc_final", "confirmar_manual",
-        }
-        faltantes = obrigatorias - set(reader.fieldnames or [])
-        if faltantes:
-            raise ValueError(
-                "a planilha não tem colunas de revisão atualizadas: "
-                + ", ".join(sorted(faltantes))
-                + ". Rode novamente pltube.py com --modelo-hibrido."
-            )
-        registros = list(reader)
-
-    conexao = pltube.abrir_banco_estado(arquivo_estado, arquivo_metadados)
-    try:
-        planos: list[dict[str, Any]] = []
-        erros = 0
-        selecionadas = 0
-        for numero, registro in enumerate(registros, start=2):
-            if not _verdadeiro(registro.get("aplicar")):
-                continue
-            selecionadas += 1
-            try:
-                planos.append(_montar_plano(registro, conexao, pasta_musicas))
-            except (ValueError, TypeError, KeyError) as exc:
-                erros += 1
-                print(f"Linha {numero}: não aplicada — {exc}")
-
-        if not selecionadas:
-            print("Nenhuma linha marcada com aplicar=sim.")
-            return {"planejadas": 0, "aplicadas": 0, "erros": 0}
-
-        modo = "APLICAR" if aplicar else "SIMULAÇÃO — nenhuma alteração será feita"
-        print(f"{modo}: {len(planos)} faixa(s) válida(s); {erros} erro(s).")
-        for plano in planos:
-            campos = ", ".join(plano["fields"]) or "confirmação manual"
-            estado = "RESOLVIDO" if plano["confirmed"] else "continua pendente"
-            print(
-                f"{plano['video_id'] or plano['video_key']}: {plano['audio_path']} "
-                f"| campos: {campos} | {estado}"
-            )
-
-        aplicadas = 0
-        if aplicar:
-            for plano in planos:
-                try:
-                    _aplicar_plano(conexao, plano, pasta_playlists)
-                    aplicadas += 1
-                    print(f"Atualizado: {plano['audio_path']}")
-                except Exception as exc:
-                    erros += 1
-                    print(f"Falha ao aplicar {plano['video_key']}: {exc}")
-            pltube.exportar_metadados_pendentes(conexao, arquivo_csv)
-            print(f"Planilha atualizada: {arquivo_csv}")
-        else:
-            print("Revise o plano e repita o comando com --apply para gravar as alterações.")
-        return {"planejadas": len(planos), "aplicadas": aplicadas, "erros": erros}
-    finally:
-        conexao.close()
-
-
-def executar(args: argparse.Namespace) -> int:
-    """Executa o aplicador a partir de argumentos já interpretados (usado por plpython.py)."""
-    # A pasta base só serve para ler CSVs no download; aqui tudo vem da pasta atual.
-    base = os.getcwd()
-    arquivo_csv = _caminho(base, args.arquivo)
-    arquivo_estado = _caminho(base, args.downloads_db)
-    arquivo_metadados = _caminho(base, args.metadata_db)
-    if getattr(args, "artists_db", None):
-        pltube.ARTISTAS_DB = os.path.abspath(args.artists_db)
-    padrao_musicas = os.path.join(base, "songs")
-    pasta_musicas = os.path.abspath(args.songs_dir) if args.songs_dir else padrao_musicas
-    pasta_playlists = (
-        os.path.abspath(args.playlist_dir)
-        if args.playlist_dir
-        else os.path.join(base, "playlists")
-    )
-    try:
-        resultado = aplicar_revisoes(
-            arquivo_csv,
-            arquivo_estado,
-            pasta_musicas,
-            pasta_playlists,
-            arquivo_metadados=arquivo_metadados,
-            aplicar=args.apply,
-        )
-    except (OSError, ValueError) as exc:
-        print(f"Erro: {exc}")
-        return 1
-    return 1 if resultado["erros"] else 0

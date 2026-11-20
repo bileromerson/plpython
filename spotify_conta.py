@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from resolvedor_metadados import _normalize_text
+from textos import _normalize_text
 from verbose import colorir, v, vv
 
 API = "https://api.spotify.com/v1"

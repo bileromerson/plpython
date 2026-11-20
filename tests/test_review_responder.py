@@ -84,7 +84,7 @@ class ResponderTests(unittest.TestCase):
         codigo, saida = self.responder(["", "", "", ":db", "Random Access Memories"])
         self.assertEqual(codigo, 0, saida)
         self.assertIn("título diverge", saida)
-        self.assertIn("banco: Get Lucky", saida)
+        self.assertIn("YT Music: Get Lucky", saida)
         resolucoes, _ = self.banco()
         a, b = resolucoes["aaaaaaaaaaa"]["result"], resolucoes["bbbbbbbbbbb"]["result"]
         self.assertEqual(a["status"], "RESOLVIDO")
@@ -163,7 +163,7 @@ class ResponderTests(unittest.TestCase):
     def test_so_pergunta_os_campos_com_problema_e_legenda_fica_no_topo(self):
         codigo, saida = self.responder([":s", ":s"])
         self.assertIn("  Artistas  ✓ Daft Punk", saida)        # A: artista certo, não perguntado
-        self.assertIn("  Título    ⚠ Get Lucky Remix    banco: Get Lucky", saida)
+        self.assertIn("  Título    ⚠ Get Lucky Remix    YT Music: Get Lucky", saida)
         self.assertIn("⚠ Título [Get Lucky Remix]: ", saida)
         self.assertNotIn("Artistas [Daft Punk]", saida)
         self.assertIn("  Artistas  ⚠ Canal Qualquer", saida)    # B: deduzida
@@ -209,7 +209,7 @@ class ResponderTests(unittest.TestCase):
             _, colorido = self.responder([":s", ":s"])
         self.assertIn("\033[1;33m⚠\033[0m", colorido)
         self.assertIn("\033[1;33m[OBSERVAR]\033[0m", colorido)
-        self.assertIn("\033[35mbanco: Get Lucky\033[0m", colorido)
+        self.assertIn("\033[35mYT Music: Get Lucky\033[0m", colorido)
         _, simples = self.responder([":s", ":s"])
         self.assertNotIn("\033[", simples)
 
@@ -225,7 +225,7 @@ class ResponderTests(unittest.TestCase):
 
     def test_digitar_de_novo_com_barra(self):
         codigo, saida = self.responder(["", "Fulano & Beltrano", "Fulano | Beltrano", "", "", ""])
-        self.assertIn("→ 1 artista: Fulano & Beltrano", saida)
+        self.assertIn("→ 2 artistas: Fulano | Beltrano", saida)  # " & " com espaços já separa
         self.assertEqual(self.banco()[0]["bbbbbbbbbbb"]["result"]["metadata"]["artists"], ["Fulano", "Beltrano"])
 
     def test_inv_troca_titulo_e_artista(self):

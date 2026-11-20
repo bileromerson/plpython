@@ -1,6 +1,6 @@
 """Motor do download (usado pelo comando `plpython.py download`/`update`).
 
-Lê os CSVs, consulta o YouTube, identifica a música (resolvedor_metadados),
+Lê os CSVs, consulta o YouTube, identifica a música (identificar_musica, pelo YouTube Music),
 baixa o áudio, grava tags e capa, organiza as pastas e gera as M3Us. Não é
 executado diretamente: use `python plpython.py download ...`.
 """
@@ -27,10 +27,11 @@ from urllib.parse import parse_qs, urlsplit
 import progresso
 import verbose
 from verbose import curto, v, vv, vvv
-from resolvedor_metadados import (
-    LIMIAR_CONFIANCA, MusicBrainzClient, _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
+import identificar_musica
+from textos import (
+    _DESCRICAO_REUPLOAD, _mesmo_nome, _nome_canal_limpo,
     _normalize_text as _normalizar_texto,
-    dividir_artistas, ler_descricao_youtube_music, normalize_isrc, resolver_com_prioridade,
+    dividir_artistas, ler_descricao_youtube_music, normalize_isrc,
 )
 
 try:
@@ -48,18 +49,18 @@ ROW = 2
 ARTIST_LINKS = False
 ESPERAR_BLOQUEIO = False
 MODELO_HIBRIDO = False
-EXIGIR_ISRC = False
-EXIGIR_ARTISTA_MUSICBRAINZ = False
-PREFERIR = "youtube"  # em divergência: youtube | musicbrainz
-REVISAR = "all"  # all | diff | none
+REVISAR = "errors"  # errors (só sinais fortes de erro) | all (também o que foi deduzido) | none
 STATUS_REVISAO = ("PENDENTE", "OBSERVAR")
-MUSICBRAINZ_CLIENT: MusicBrainzClient | None = None
-RESOLVER_CACHE: dict[str, Any] = {}
+YTMUSIC: identificar_musica.ClienteYTMusic | None = None
 FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução sem dados confirmados
 ARTISTAS_DB = ""  # --artists-db; vazio = artistas.sqlite3 ao lado do banco de músicas
 ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
-FONTES_ARTISTA_CONFIRMADO = {"musicbrainz", "youtube_validado_musicbrainz", "manual", "youtube_music", "banco_isrc"}
+# Artista vindo de quem publica a música (e correções suas); faixas de downloads antigos
+# confirmadas pelo MusicBrainz continuam valendo.
+FONTES_ARTISTA_CONFIRMADO = identificar_musica.FONTES_CONFIAVEIS | {
+    "manual", "banco_isrc", "musicbrainz", "youtube_validado_musicbrainz",
+}
 # Falhas de rede/servidor (502/503, timeout): somem em segundos ou minutos.
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
@@ -69,7 +70,7 @@ ESPERA_MAXIMA_SEGUNDOS = 600
 # prolonga o bloqueio, então as esperas são longas e passam de 1 hora no total.
 ESPERAS_LIMITE_SESSAO = (5 * 60, 15 * 60, 30 * 60, 60 * 60)
 # Pausa entre vídeos, como recomenda a wiki do yt-dlp (5-10 s). O tempo gasto com
-# MusicBrainz/download conta, então só espera o que faltar.
+# YouTube Music/download conta, então só espera o que faltar.
 PAUSA_YOUTUBE = (5.0, 10.0)
 PAUSA_ENTRE_REQUISICOES = 0.75  # dentro de uma mesma consulta (preset "-t sleep" do yt-dlp)
 _ULTIMA_CONSULTA_YOUTUBE: float | None = None
@@ -85,8 +86,8 @@ MAX_INFO_YOUTUBE = 50
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
-    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, EXIGIR_ISRC, PAUSA_YOUTUBE, COOKIES_YTDLP
-    global EXIGIR_ARTISTA_MUSICBRAINZ, PREFERIR, REVISAR, ARTISTAS_DB
+    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, PAUSA_YOUTUBE, COOKIES_YTDLP
+    global REVISAR, ARTISTAS_DB
 
     caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
     if os.path.isfile(caminho_csv):
@@ -110,14 +111,11 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     ARTIST_LINKS = args.artist_links
     ESPERAR_BLOQUEIO = args.esperar_bloqueio
     MODELO_HIBRIDO = args.modelo_hibrido
-    EXIGIR_ISRC = args.exigir_isrc
-    EXIGIR_ARTISTA_MUSICBRAINZ = args.exigir_artista_musicbrainz
-    PREFERIR = getattr(args, "preferir", None) or "youtube"
     COOKIES_YTDLP = dict(getattr(args, "cookies_ytdlp", None) or {})
     pausa = getattr(args, "pausa", None)
     if pausa is not None:
         PAUSA_YOUTUBE = tuple(pausa)
-    REVISAR = getattr(args, "revisar", None) or "all"
+    REVISAR = {"diff": "errors"}.get(getattr(args, "revisar", None) or "errors", getattr(args, "revisar", None) or "errors")
     ARTISTAS_DB = os.path.abspath(args.artists_db) if getattr(args, "artists_db", None) else ""
 
 
@@ -1044,6 +1042,8 @@ def aprender_artistas(conexao: sqlite3.Connection | None, resultado: dict[str, A
 
     if not banco_artistas.anexado(conexao) or (resultado or {}).get("status") != "RESOLVIDO":
         return
+    if (resultado.get("provenance") or {}).get("artists") not in banco_artistas.FONTES_CONFIAVEIS:
+        return  # deduzido do título/canal: não vira artista "conhecido"
     try:
         for nome in (resultado.get("metadata") or {}).get("artists") or []:
             banco_artistas.adicionar(conexao, nome, origem)
@@ -1057,7 +1057,7 @@ def artista_confiavel(resultado: dict[str, Any] | None) -> bool:
         return False
     if (resultado.get("provenance") or {}).get("artists") in FONTES_ARTISTA_CONFIRMADO:
         return True
-    return float((resultado.get("scores") or {}).get("artists") or 0) >= LIMIAR_CONFIANCA
+    return resultado.get("status") == "RESOLVIDO"
 
 
 CAMPOS_DO_ISRC = ("title", "artists", "artist", "album", "album_artists", "date", "label", "track_number",
@@ -1108,25 +1108,22 @@ def resolver_meta_hibrido(
     dados_locais: dict[str, Any] | None = None,
     sem_dados_youtube: bool = False,
     estado: sqlite3.Connection | None = None,
+    forcar: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     progresso.etapa("identificando artista, álbum e capa")
     # 1º o código da música (ISRC): se outra faixa já confirmada tem o mesmo, é a mesma gravação
     isrc = normalize_isrc(meta.get("isrc") or (dados_locais or {}).get("isrc"))
     conhecida = faixa_pelo_isrc(estado, isrc, str(meta.get("id") or "")) if isrc else None
-    resultado = resolver_com_prioridade(
-        str(meta.get("id") or ""),
-        {} if sem_dados_youtube else meta,
-        cache=RESOLVER_CACHE,
-        musicbrainz_client=MUSICBRAINZ_CLIENT,
-        preferir=PREFERIR,
-        revisar=REVISAR,
+    resultado = identificar_musica.identificar(
+        meta,
+        cliente=None if conhecida else YTMUSIC,  # já confirmada pelo ISRC: não precisa consultar
+        conhecidos=ARTISTAS_CONHECIDOS,
         canal_conhecido=perfil_canal(estado, chave_canal(meta)),
-        artistas_conhecidos=ARTISTAS_CONHECIDOS,
-        exigir_isrc=EXIGIR_ISRC,
-        exigir_artista_musicbrainz=EXIGIR_ARTISTA_MUSICBRAINZ,
         dados_locais=dados_locais,
-        consultar_musicbrainz=conhecida is None,  # já confirmada pelo ISRC: não precisa consultar
-    ).to_dict()
+        sem_dados_youtube=sem_dados_youtube,
+        revisar=REVISAR,
+        forcar=forcar,
+    )
     if conhecida:
         usar_faixa_do_isrc(resultado, conhecida, isrc)
     import banco_artistas
@@ -1136,8 +1133,11 @@ def resolver_meta_hibrido(
     return meta_do_resultado_hibrido(resultado), resultado
 
 
+CAPAS_DE_ALBUM = {"youtube_music", "cover_art_archive"}  # capas quadradas de álbum (substituem a thumbnail)
+
+
 def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
-    """Grava no MP3 as tags completas (faixa, álbum, IDs MusicBrainz), a capa do
+    """Grava no MP3 as tags completas (faixa, álbum, artista do álbum, ISRC), a capa do
     álbum e um marcador de status. Funciona como o Picard: TPE1 com vários
     artistas, TPE2 artista do álbum, TRCK "n/total", UFID da gravação."""
     try:
@@ -1205,15 +1205,16 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
         if metadata.get("musicbrainz_recording_id"):
             tags.add(UFID(owner="http://musicbrainz.org", data=str(metadata["musicbrainz_recording_id"]).encode()))
 
-        # Capa: a do álbum (Cover Art Archive) substitui a thumbnail do vídeo;
+        # Capa: a do álbum (YouTube Music) substitui a thumbnail do vídeo;
         # sem ela, a thumbnail é recortada para ficar quadrada. O marcador evita
         # baixar/recortar de novo a cada execução.
         marcador = str(tags.get("TXXX:PLTUBE_COVER") or "")
         fonte = metadata.get("cover_source") or ""
         url = str(metadata.get("cover_url") or "")
-        if marcador and (marcador == url or (marcador == "thumbnail-recortada" and fonte != "cover_art_archive")):
+        capa_de_album = fonte in CAPAS_DE_ALBUM
+        if marcador and (marcador == url or (marcador == "thumbnail-recortada" and not capa_de_album)):
             vv("Capa", "capa já aplicada em execução anterior; nada a fazer")
-        if fonte == "cover_art_archive" and url and marcador != url:
+        if capa_de_album and url and marcador != url:
             imagem = _baixar_capa(url)
             if imagem:
                 tags.delall("APIC")
@@ -1247,139 +1248,6 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
     except Exception as exc:
         registrar_erro(audio_path, f"Não foi possível gravar tags do modelo híbrido: {exc}")
         return False
-
-
-def exportar_metadados_pendentes(
-    conexao: sqlite3.Connection, destino: str | None = None
-) -> str:
-    """Exporta um CSV legível com uma linha por vídeo ainda sem comprovação clara."""
-    destino = destino or os.path.join(WORK_DIR, "metadados_pendentes.csv")
-    os.makedirs(os.path.dirname(os.path.abspath(destino)), exist_ok=True)
-    colunas_editaveis = [
-        "aplicar", "usar_titulo", "titulo_final", "usar_artistas", "artistas_finais",
-        "usar_album", "album_final", "usar_isrc", "isrc_final", "confirmar_manual",
-    ]
-    colunas = [
-        "video_key", "video_id", "url_youtube", "arquivo_audio", "playlists", "status",
-        "titulo_youtube", "artistas_youtube", "canal_youtube", "album_youtube", "titulo_usado",
-        "artistas_usados", "album_sugerido", "isrc_youtube", "isrc_sugerido",
-        "thumbnail_youtube", "capa_sugerida", "motivos_pendencia", "diagnosticos",
-        "diagnosticos_youtube", "diagnosticos_local", "diagnosticos_musicbrainz",
-        "candidatos_musicbrainz", "proveniencia", "confianca", "observacoes", *colunas_editaveis,
-    ]
-    edicoes_anteriores: dict[str, dict[str, str]] = {}
-    colunas_anteriores: set[str] = set()
-    if os.path.isfile(destino):
-        try:
-            with open(destino, "r", encoding="utf-8-sig", newline="") as arquivo_existente:
-                reader = csv.DictReader(arquivo_existente)
-                colunas_anteriores = set(reader.fieldnames or [])
-                for registro_antigo in reader:
-                    chave = (registro_antigo.get("video_key") or "").strip()
-                    if not chave and registro_antigo.get("video_id"):
-                        chave = "youtube:" + registro_antigo["video_id"].strip()
-                    if chave:
-                        edicoes_anteriores[chave] = {
-                            coluna: registro_antigo.get(coluna, "") or ""
-                            for coluna in colunas_editaveis
-                            if coluna in colunas_anteriores
-                        }
-        except (OSError, csv.Error, UnicodeError) as exc:
-            print(f"Aviso: não consegui preservar edições anteriores de {destino}: {exc}")
-    linhas = conexao.execute(
-        """SELECT r.video_key, r.video_id, r.result_json, r.audio_path,
-                  v.source_url
-           FROM music.metadata_resolution r
-           LEFT JOIN video_cache v ON v.video_key = r.video_key
-           WHERE r.status IN ('PENDENTE', 'OBSERVAR')
-           ORDER BY r.video_id, r.video_key"""
-    ).fetchall()
-    fd, temporario = tempfile.mkstemp(
-        prefix=".metadados-pendentes-",
-        suffix=".csv",
-        dir=os.path.dirname(os.path.abspath(destino)),
-    )
-    os.close(fd)
-    try:
-        with open(temporario, "w", encoding="utf-8-sig", newline="") as arquivo:
-            writer = csv.DictWriter(arquivo, fieldnames=colunas)
-            writer.writeheader()
-            for linha in linhas:
-                try:
-                    resultado = json.loads(linha["result_json"] or "{}")
-                except (TypeError, json.JSONDecodeError):
-                    resultado = {}
-                metadata = resultado.get("metadata") or {}
-                origem = resultado.get("source_youtube") or {}
-                video_key = linha["video_key"]
-                playlists = [
-                    os.path.splitext(os.path.basename(row[0]))[0]
-                    for row in conexao.execute(
-                        "SELECT DISTINCT csv_path FROM playlist_items WHERE video_key = ?",
-                        (video_key,),
-                    ).fetchall()
-                ]
-                dados = {
-                    "video_key": video_key,
-                    "video_id": linha["video_id"],
-                    "url_youtube": linha["source_url"] or "",
-                    "arquivo_audio": _resolver_caminho_banco(linha["audio_path"] or "", conexao),
-                    "playlists": " | ".join(playlists),
-                    "status": resultado.get("status") or "PENDENTE",
-                    "titulo_youtube": origem.get("title") or "",
-                    "artistas_youtube": " | ".join(origem.get("artists") or []),
-                    "canal_youtube": origem.get("uploader") or "",
-                    "album_youtube": origem.get("album") or "",
-                    "titulo_usado": metadata.get("title") or "",
-                    "artistas_usados": " | ".join(metadata.get("artists") or []),
-                    "album_sugerido": metadata.get("album") or "",
-                    "isrc_youtube": origem.get("isrc") or "",
-                    "isrc_sugerido": metadata.get("isrc") or "",
-                    "thumbnail_youtube": origem.get("thumbnail_url") or "",
-                    "capa_sugerida": metadata.get("cover_url") or "",
-                    "motivos_pendencia": " | ".join(resultado.get("pending_reasons") or []),
-                    "diagnosticos": " | ".join(resultado.get("diagnostics") or []),
-                    "diagnosticos_youtube": " | ".join(
-                        (resultado.get("diagnostics_by_source") or {}).get("youtube") or []
-                    ),
-                    "diagnosticos_local": " | ".join(
-                        (resultado.get("diagnostics_by_source") or {}).get("local") or []
-                    ),
-                    "diagnosticos_musicbrainz": " | ".join(
-                        (resultado.get("diagnostics_by_source") or {}).get("musicbrainz") or []
-                    ),
-                    "candidatos_musicbrainz": json.dumps(
-                        resultado.get("candidates") or [], ensure_ascii=False
-                    ),
-                    "proveniencia": json.dumps(
-                        resultado.get("provenance") or {}, ensure_ascii=False
-                    ),
-                    "confianca": json.dumps(
-                        resultado.get("confidence") or {}, ensure_ascii=False
-                    ),
-                    "observacoes": " | ".join(resultado.get("observations") or []),
-                }
-                padroes = {
-                    "aplicar": "nao",
-                    "usar_titulo": "nao",
-                    "titulo_final": metadata.get("title") or "",
-                    "usar_artistas": "nao",
-                    "artistas_finais": " | ".join(metadata.get("artists") or []),
-                    "usar_album": "nao",
-                    "album_final": metadata.get("album") or "",
-                    "usar_isrc": "nao",
-                    "isrc_final": metadata.get("isrc") or "",
-                    "confirmar_manual": "nao",
-                }
-                antigas = edicoes_anteriores.get(video_key, {})
-                for coluna in colunas_editaveis:
-                    dados[coluna] = antigas.get(coluna, padroes[coluna])
-                writer.writerow(dados)
-        os.replace(temporario, destino)
-    finally:
-        if os.path.exists(temporario):
-            os.unlink(temporario)
-    return destino
 
 
 def normalizar_artistas(
@@ -1691,12 +1559,9 @@ def _baixar_capa(url: str) -> bytes | None:
         vv("Capa", "capa já baixada nesta execução (mesmo álbum)")
         return CAPAS_BAIXADAS[url]
     v("Capa", f"baixando a capa do álbum: {url}")
-    dados = None
-    cliente = MUSICBRAINZ_CLIENT or MusicBrainzClient()
-    try:
-        dados = cliente.download_image(url)
-    except Exception as exc:
-        registrar_erro(url, f"Não foi possível baixar a capa do álbum: {exc}")
+    dados = identificar_musica.baixar_imagem(url)
+    if dados is None:
+        registrar_erro(url, "Não foi possível baixar a capa do álbum")
     CAPAS_BAIXADAS[url] = dados
     if dados:
         v("Capa", f"capa baixada ({len(dados) // 1024} KB)")
@@ -1870,6 +1735,24 @@ def progresso_csv(
         (csv_path, assinatura, next_row, int(complete), total_rows),
     )
     estado.commit()
+
+
+def meta_do_youtube_salvo(meta: dict[str, Any], resultado: dict[str, Any]) -> dict[str, Any]:
+    """Para identificar de novo sem consultar o YouTube: os dados do vídeo guardados no banco
+    (título do vídeo, canal, créditos) no lugar do título/artista já resolvidos."""
+    yt = (resultado or {}).get("source_youtube") or {}
+    if not (yt.get("video_title") or yt.get("uploader")):
+        return meta
+    return {
+        **meta, "title": yt.get("video_title") or yt.get("title") or meta.get("title"),
+        "track": yt.get("track") or "", "artists": list(yt.get("artists") or []),
+        "fonte_artistas": yt.get("fonte_artistas") or "youtube", "album": yt.get("album") or "",
+        "isrc": yt.get("isrc") or "", "uploader": yt.get("uploader") or "",
+        "duration": yt.get("duration") or meta.get("duration") or 0, "thumbnails": yt.get("thumbnails") or [],
+        "channel_id": yt.get("channel_id") or "", "channel_is_verified": bool(yt.get("channel_verified")),
+        "release_date": yt.get("release_date") or "", "youtube_music": yt.get("youtube_music") or {},
+        "descricao_reupload": bool(yt.get("descricao_reupload")),
+    }
 
 
 def meta_do_registro(registro: dict[str, Any]) -> dict[str, Any]:
@@ -2101,6 +1984,8 @@ def _processar_csv(
                                         dados_locais = metadados_de_arquivo_local(
                                             music_path, video_id
                                         ).get("local_metadata")
+                                    if salvo_hibrido and meta.get("fonte_artistas") == "cache":
+                                        meta = meta_do_youtube_salvo(meta, salvo_hibrido["result"])
                                     meta, hybrid_result = resolver_meta_hibrido(
                                         meta,
                                         dados_locais=dados_locais,
@@ -2237,8 +2122,8 @@ def _processar_csv(
 
 
 def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> None:
-    """download --ask: o que não foi confirmado nem pelo banco, nem pela lista de artistas,
-    nem pela pontuação do YouTube vira pergunta no fim, só nos campos que faltam."""
+    """download --ask: as faixas desta execução com sinal de erro (ou sem artista) viram
+    pergunta no fim, só nos campos apontados."""
     if not FAIXAS_PARA_PERGUNTAR:
         return
     chaves = {
@@ -2254,8 +2139,8 @@ def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> 
         return
     from comandos import review
 
-    print(f"\n{len(chaves)} faixa(s) desta execução não foram confirmadas (nem pelo banco, nem pela lista "
-          "de artistas, nem pelo YouTube). Preencha o que falta; :s pula a faixa, :q termina.\n")
+    print(f"\n{len(chaves)} faixa(s) desta execução têm sinal de erro no artista ou no título. "
+          "Corrija o que estiver errado; :s pula a faixa, :q termina.\n")
     opcoes = review.criar_parser().parse_args([])
     opcoes.responder = True
     opcoes.chaves = chaves
@@ -2267,10 +2152,9 @@ def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> 
 
 def executar(args: argparse.Namespace) -> int:
     """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
-    global MUSICBRAINZ_CLIENT, RESOLVER_CACHE
+    global YTMUSIC
     verificar_diretorios(args)
-    MUSICBRAINZ_CLIENT = MusicBrainzClient() if MODELO_HIBRIDO else None
-    RESOLVER_CACHE = {}
+    YTMUSIC = identificar_musica.ClienteYTMusic() if MODELO_HIBRIDO else None
     criar_diretorios()
 
     if args.lista:
@@ -2342,15 +2226,12 @@ def executar(args: argparse.Namespace) -> int:
         progresso.encerrar()
         if MODELO_HIBRIDO:
             try:
-                caminho_pendencias = exportar_metadados_pendentes(estado)
                 total_pendentes = estado.execute(
                     "SELECT COUNT(*) FROM metadata_resolution WHERE status IN ('PENDENTE', 'OBSERVAR')"
                 ).fetchone()[0]
-                print(
-                    f"Fila de metadados pendentes: {total_pendentes} faixa(s) em "
-                    f"{caminho_pendencias}"
-                )
-            except (OSError, sqlite3.Error) as exc:
-                print(f"Não foi possível exportar a fila de metadados pendentes: {exc}")
+                if total_pendentes:
+                    print(f"{total_pendentes} faixa(s) com sinal de erro para conferir: plpython.py review --answer")
+            except sqlite3.Error as exc:
+                print(f"Não foi possível contar as faixas para conferir: {exc}")
         estado.close()
     return 0

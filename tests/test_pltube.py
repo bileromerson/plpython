@@ -136,27 +136,12 @@ class PltubeTests(unittest.TestCase):
                 writer.writerow(["abc123", "Canção provisória", "https://youtube.com/watch?v=abc123"])
 
             songs, playlists = os.path.join(temp, "songs"), os.path.join(temp, "playlists")
-            # Re-upload: canal qualquer, artista só no título -> fica para conferência.
+            # Fora do YouTube Music, artista deduzido do título: com --review all vai para conferência.
             origem = {
-                "title": "Artista do vídeo - Canção provisória", "artists": [],
+                "title": "Artista Fulano - Canção provisória", "artists": [],
                 "uploader": "Canal Qualquer", "album": "Álbum do vídeo",
                 "duration": 120, "id": "abc123",
             }
-            class BaseSemResultados:
-                def search_by_isrc(self, isrc, limit=10):
-                    return []
-
-                def search_by_title_artist(self, title, artist, limit=10):
-                    return []
-
-                def search_by_title(self, title, limit=10):
-                    return []
-
-                def get_front_cover(self, release_id):
-                    return None
-
-            cliente = BaseSemResultados()
-
             def download(url, artists, title, video_id, csv_file, hybrid_result=None):
                 self.assertEqual(hybrid_result["status"], "OBSERVAR")
                 pasta = os.path.join(songs, artists[0])
@@ -169,7 +154,7 @@ class PltubeTests(unittest.TestCase):
             with patch.multiple(
                 pltube, BASE_DIR=temp, SONGS_DIR=songs, PLAYLISTS_DIR=playlists,
                 LOG_FILE=os.path.join(temp, "Logs.txt"), ROW=2, ARTIST_LINKS=True,
-                MODELO_HIBRIDO=True, MUSICBRAINZ_CLIENT=cliente, RESOLVER_CACHE={},
+                MODELO_HIBRIDO=True, YTMUSIC=None, REVISAR="all",
             ):
                 state = pltube.abrir_banco_estado(os.path.join(temp, "state.sqlite3"))
                 try:
@@ -181,7 +166,7 @@ class PltubeTests(unittest.TestCase):
                             pltube.processar_csv("lista.csv", estado=state, indice_local={})
                         )
 
-                    path = os.path.join(songs, "Artista do vídeo", "Canção provisória [abc123].mp3")
+                    path = os.path.join(songs, "Artista Fulano", "Canção provisória [abc123].mp3")
                     self.assertTrue(os.path.isfile(path))
                     pending_link = os.path.join(songs, "_observar", os.path.basename(path))
                     self.assertTrue(os.path.islink(pending_link))
@@ -207,15 +192,8 @@ class PltubeTests(unittest.TestCase):
                         dict((row[1], row[2]) for row in state.execute("PRAGMA database_list"))["music"],
                     ))
 
-                    report = pltube.exportar_metadados_pendentes(
-                        state, os.path.join(temp, "metadados_pendentes.csv")
-                    )
-                    with open(report, encoding="utf-8-sig", newline="") as handle:
-                        rows = list(csv.DictReader(handle))
-                    self.assertEqual(len(rows), 1)
-                    self.assertEqual(rows[0]["video_id"], "abc123")
-                    self.assertIn("deduzidos do título do vídeo", rows[0]["observacoes"])
-                    self.assertIn("lista", rows[0]["playlists"])
+                    obs = saved["result"]["observations"]
+                    self.assertTrue(any("deduzidos do título do vídeo" in o for o in obs), obs)
 
                     resultado_confirmado = {
                         **saved["result"],
@@ -250,7 +228,10 @@ class PltubeTests(unittest.TestCase):
                     resolve_again.assert_called_once()
                     extract_again.assert_not_called()
                     download_again.assert_not_called()
-                    apply_again.assert_called_once_with(path, resultado_confirmado)
+                    # confirmado: o MP3 vai para a pasta do artista certo
+                    novo = os.path.join(songs, "Artista confirmado", os.path.basename(path))
+                    apply_again.assert_called_once_with(novo, resultado_confirmado)
+                    path = novo
                     resolucao_atualizada = pltube.carregar_resolucao(state, "youtube:abc123")
                     self.assertEqual(resolucao_atualizada["result"]["status"], "RESOLVIDO")
                     self.assertEqual(resolucao_atualizada["audio_path"], path)
@@ -273,19 +254,6 @@ class PltubeTests(unittest.TestCase):
                     handle.write(b"old audio")
                 return audio_existente
 
-            class BaseSemResultados:
-                def search_by_isrc(self, isrc, limit=10):
-                    return []
-
-                def search_by_title_artist(self, title, artist, limit=10):
-                    return []
-
-                def search_by_title(self, title, limit=10):
-                    return []
-
-                def get_front_cover(self, release_id):
-                    return None
-
             with patch.multiple(
                 pltube, BASE_DIR=temp, SONGS_DIR=songs, PLAYLISTS_DIR=playlists,
                 LOG_FILE=os.path.join(temp, "Logs.txt"), ROW=2, ARTIST_LINKS=False,
@@ -306,8 +274,7 @@ class PltubeTests(unittest.TestCase):
 
                     with (
                         patch.object(pltube, "MODELO_HIBRIDO", True),
-                        patch.object(pltube, "MUSICBRAINZ_CLIENT", BaseSemResultados()),
-                        patch.object(pltube, "RESOLVER_CACHE", {}),
+                        patch.object(pltube, "YTMUSIC", None),
                         patch.object(pltube, "aplicar_tags_hibridas", return_value=True) as apply_tags,
                     ):
                         self.assertTrue(
@@ -319,11 +286,11 @@ class PltubeTests(unittest.TestCase):
                     apply_tags.assert_called_once()
                     self.assertEqual(apply_tags.call_args.args[0], audio_existente)
                     saved = pltube.carregar_resolucao(state, "youtube:abc123")
-                    self.assertEqual(saved["result"]["status"], "OBSERVAR")
+                    # sem dados novos e sem sinal de erro: a identificação antiga continua valendo
+                    self.assertEqual(saved["result"]["status"], "RESOLVIDO")
+                    self.assertEqual(saved["result"]["metadata"]["artists"], ["Artista antigo"])
                     self.assertEqual(saved["audio_path"], audio_existente)
-                    pending_link = os.path.join(songs, "_observar", os.path.basename(audio_existente))
-                    self.assertTrue(os.path.islink(pending_link))
-                    self.assertEqual(os.path.realpath(pending_link), os.path.realpath(audio_existente))
+                    self.assertFalse(os.path.lexists(os.path.join(songs, "_observar", os.path.basename(audio_existente))))
                 finally:
                     state.close()
 
@@ -832,14 +799,13 @@ class PltubeTests(unittest.TestCase):
     def test_parametros_do_download(self):
         from comandos import download
         args = download.criar_parser().parse_args(
-            ["--wait-on-limit", "--retry", "--downloads-db", "cache.sqlite3",
-             "--require-isrc", "--require-mb-artist"]
+            ["--wait-on-limit", "--retry", "--downloads-db", "cache.sqlite3", "--ask", "--review", "all"]
         )
         self.assertTrue(args.esperar_bloqueio)
         self.assertTrue(args.modelo_hibrido)
         self.assertTrue(args.reprocess)
-        self.assertTrue(args.exigir_isrc)
-        self.assertTrue(args.exigir_artista_musicbrainz)
+        self.assertTrue(args.perguntar)
+        self.assertEqual(args.revisar, "all")
         self.assertEqual(args.downloads_db, "cache.sqlite3")
 
     def test_base_dir_padrao_salva_m3u_na_pasta_playlists(self):

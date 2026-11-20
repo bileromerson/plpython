@@ -1,7 +1,7 @@
 """Formas curtas dos parâmetros mais usados (não podem quebrar -vv, -Pv, -u -1...)."""
 import unittest
 
-from comandos import download, metadata, playlist, revert, review, update
+from comandos import check, download, playlist, review, update
 
 
 class AtalhosTests(unittest.TestCase):
@@ -12,7 +12,8 @@ class AtalhosTests(unittest.TestCase):
     def test_download_e_update(self):
         p = download.criar_parser()
         self.confere(p, ["-w", "-r"], esperar_bloqueio=True, reprocess=True)
-        self.confere(p, ["-db", "-nr", "-nh"], preferir="musicbrainz", revisar="none", modelo_hibrido=False)
+        self.confere(p, ["-nr", "-nh"], revisar="none", modelo_hibrido=False)
+        self.confere(p, ["-i", "-x", "album"], perguntar=True, ignorar=["album"])
         self.confere(p, ["-b", "firefox:Perfil 1"], cookies_navegador="firefox:Perfil 1")
         self.confere(p, ["-k", "cookies.txt"], cookies_arquivo="cookies.txt")
         self.confere(p, ["-Pvv", "-u", "-1"], progresso=True, verbose=2, row=-1)
@@ -25,9 +26,8 @@ class AtalhosTests(unittest.TestCase):
         self.confere(p, ["-q", "snuffles", "-d", "-e", "x.csv"], busca="snuffles", detalhes=True, export="x.csv")
         self.confere(p, ["--status", "resolved"], status="resolved")
 
-    def test_metadata_revert_playlist(self):
-        self.confere(metadata.criar_parser(), ["-y", "-f", "r.csv"], apply=True, arquivo="r.csv")
-        self.confere(revert.criar_parser(), ["-y"], apply=True)
+    def test_check_e_playlist(self):
+        self.confere(check.criar_parser(), ["-y", "-q", "snuffles"], apply=True, busca="snuffles")
         self.confere(playlist.criar_parser(), ["liked", "-n", "X", "-b", "firefox"], nome="X", cookies_navegador="firefox")
 
 

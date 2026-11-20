@@ -38,7 +38,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-import resolvedor_metadados as rm
+import textos as rm
 from spotify_conta import caminho_curto, chave_nome, extrair_playlist_id, ler_csv, numero, qtd
 from verbose import colorir, v, vv
 

@@ -9,15 +9,15 @@ confirma a correção:
   * são os mesmos nomes, só com outra grafia ou divisão
     ("TheFatRat & NEFFEX" → "TheFatRat | NEFFEX"); ou
   * o novo artista aparece no título do vídeo, nos créditos do YouTube (Music) ou
-    nos candidatos do MusicBrainz desta faixa.
+    na sugestão do YouTube Music desta faixa.
 
 Um canal de re-upload publica vários artistas; sem essa confirmação a correção não
 é aplicada e, no próximo review, aparece como sugestão (:sug). Se o mesmo artista
 errado foi corrigido para nomes diferentes em faixas diferentes, nada é propagado.
 
-Aplicada a correção, a faixa é identificada de novo com o artista certo (MusicBrainz:
-título oficial, álbum, capa). Ela só sai da lista se tudo o que é necessário ficar
-completo; senão continua OBSERVAR, só com o que falta.
+Aplicada a correção, a faixa é identificada de novo com o artista certo (o YouTube
+Music completa álbum e capa). Ela só sai da lista se não sobrar sinal de erro;
+senão continua OBSERVAR, só com o que falta.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-import resolvedor_metadados as rm
+import textos as rm
 from verbose import colorir, v
 
 
@@ -140,9 +140,10 @@ def _reidentificar(conexao: sqlite3.Connection, salvo: dict, regra: Regra) -> di
     titulo_video = yt.get("video_title") or yt.get("title")
     if not titulo_video:
         return None
+    titulo_atual = (resultado.get("metadata") or {}).get("title") or ""
     meta = {
         "id": resultado.get("video_id") or "", "title": titulo_video, "track": yt.get("track") or "",
-        "artists": list(regra.para), "fonte_artistas": "youtube",
+        "artists": list(yt.get("artists") or []), "fonte_artistas": yt.get("fonte_artistas") or "youtube",
         "album": yt.get("album") or "", "isrc": yt.get("isrc") or "", "uploader": yt.get("uploader") or "",
         "duration": yt.get("duration") or 0, "thumbnails": yt.get("thumbnails") or [],
         "channel_id": yt.get("channel_id") or "", "channel_is_verified": bool(yt.get("channel_verified")),
@@ -150,13 +151,12 @@ def _reidentificar(conexao: sqlite3.Connection, salvo: dict, regra: Regra) -> di
         "descricao_reupload": bool(yt.get("descricao_reupload")),
     }
     try:
-        _, novo = pltube.resolver_meta_hibrido(meta, estado=conexao)
-    except Exception as exc:  # noqa: BLE001 - sem MusicBrainz: só troca o artista
-        v("MusicBrainz", f"não deu para identificar de novo: {exc}")
+        _, novo = pltube.resolver_meta_hibrido(
+            meta, estado=conexao, forcar={"title": titulo_atual, "artists": list(regra.para)})
+    except Exception as exc:  # noqa: BLE001 - sem YouTube Music: só troca o artista
+        v("Identificação", f"não deu para identificar de novo: {exc}")
         return None
-    provenance = novo.setdefault("provenance", {})
-    if provenance.get("artists") not in {"musicbrainz", "youtube_validado_musicbrainz"}:
-        provenance["artists"] = "manual_regra"
+    novo.setdefault("provenance", {})["artists"] = "manual_regra"
     novo.setdefault("confidence", {})["artists"] = "confirmada_manual"
     novo.setdefault("scores", {})["artists"] = 1.0
     return novo
@@ -211,9 +211,8 @@ def aplicar(conexao: sqlite3.Connection, args: Any) -> int:
     pltube.LOG_FILE = os.path.join(os.getcwd(), "Logs.txt")
     os.makedirs(pasta_playlists, exist_ok=True)
     pltube.ARTISTAS_CONHECIDOS[:] = pltube.carregar_artistas_conhecidos(conexao)
-    pltube.PREFERIR = "youtube"  # o artista que você corrigiu vale; divergência do MusicBrainz fica anotada
-    if pltube.MUSICBRAINZ_CLIENT is None:
-        pltube.MUSICBRAINZ_CLIENT = rm.MusicBrainzClient()
+    if pltube.YTMUSIC is None:  # para completar álbum e capa das faixas corrigidas
+        pltube.YTMUSIC = __import__("identificar_musica").ClienteYTMusic()
 
     print(f"{len(regras)} correção(ões) de artista guardada(s). Conferindo as faixas da lista uma por uma…\n")
     resolvidas = parciais = recusadas = erros = 0

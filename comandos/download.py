@@ -18,16 +18,16 @@ NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
 OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  -P/--progress  -v/-vv/-vvv\n"
-          "-w/--wait-on-limit  -r/--retry  -db/--prefer-db  -nr/--no-review  -nh/--no-hybrid  --review\n"
-          "-b/--cookies-from-browser  -k/--cookies  --sleep  --no-artist-links  --require-isrc  --require-mb-artist")
+          "-w/--wait-on-limit  -r/--retry  -i/--ask  -x/--skip  -nr/--no-review  -nh/--no-hybrid  --review\n"
+          "-b/--cookies-from-browser  -k/--cookies  --sleep  --no-artist-links")
 EXEMPLOS = """\
-  plpython.py download -c ./csvs                      # identifica artista, álbum e capa
+  plpython.py download -c ./csvs                      # identifica pelo YouTube Music: artista, álbum e capa
   plpython.py download -c ./csvs/Alone.csv            # só uma playlist
   plpython.py download csvs/Alone.csv csvs/Rain.csv --append
   plpython.py download -c ./csvs -s Musicas -p ./m3u
-  plpython.py download -c ./csvs --prefer-db          # MusicBrainz vence divergências
-  plpython.py download -c ./csvs --review diff        # só pede conferência de divergências
-  plpython.py download -c ./csvs --no-hybrid          # rápido: só dados do YouTube
+  plpython.py download -c ./csvs --ask                # no fim, pergunta o que tiver sinal de erro
+  plpython.py download -c ./csvs --review all         # confere também o que não está no YouTube Music
+  plpython.py download -c ./csvs --no-hybrid          # sem identificar: título e canal do vídeo
   plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa
   plpython.py download -c ./csvs --cookies-from-browser firefox  # com a sua conta do Google
   plpython.py download -c ./csvs/Alone.csv -v         # mostra cada passo (-vv: tudo)
@@ -75,24 +75,16 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("-l", "--log-file", dest="log_file", metavar="ARQ",
                    help="arquivo de log de erros (padrão: ./Logs.txt)")
 
-    h = p.add_argument_group("identificação de artista, álbum e capa (ligada por padrão)")
+    h = p.add_argument_group("identificação pelo YouTube Music (ligada por padrão)")
     h.add_argument("-nh", "--no-hybrid", dest="modelo_hibrido", action="store_false", default=True,
-                   help="desliga a identificação: usa só os dados do YouTube, sem MusicBrainz, "
+                   help="desliga a identificação: usa o título e o canal do vídeo, sem YouTube Music, "
                         "capa do álbum nem lista de conferência (mais rápido)")
-    h.add_argument("--require-isrc", dest="exigir_isrc", action="store_true",
-                   help="deixa pendente faixa sem ISRC confirmado")
-    h.add_argument("--require-mb-artist", dest="exigir_artista_musicbrainz", action="store_true",
-                   help="exige artista confirmado pelo MusicBrainz")
-    h.add_argument("-db", "--prefer-db", dest="preferir", action="store_const", const="musicbrainz",
-                   default="youtube",
-                   help="se YouTube e MusicBrainz divergirem, usa o MusicBrainz (padrão: YouTube); "
-                        "a divergência continua indo para a lista")
-    h.add_argument("--review", dest="revisar", choices=["all", "diff", "none"], default="all",
-                   help="o que marcar como OBSERVAR: all = divergências + dados só do YouTube (padrão); "
-                        "diff = só divergências; none = não marca nada")
+    h.add_argument("--review", dest="revisar", choices=["errors", "all", "none", "diff"], default="errors",
+                   help="o que vai para conferência (OBSERVAR): errors = só faixas com sinal forte de erro "
+                        "(padrão); all = também as que não estão no YouTube Music (deduzidas do título/canal); "
+                        "none = nada")
     h.add_argument("-i", "--ask", dest="perguntar", action="store_true",
-                   help="no fim, pergunta os dados que faltam das faixas desta execução que não foram "
-                        "confirmadas (nem pelo banco, nem pela lista de artistas, nem pelo YouTube); "
+                   help="no fim, pergunta os campos com sinal de erro das faixas desta execução; "
                         "é o mesmo que rodar review --answer só nelas")
     h.add_argument("-x", "--skip", dest="ignorar", nargs="+", action="extend", default=[], metavar="CAMPO",
                    help="com --ask: não pergunta estes campos (title, artists, album, isrc)")
@@ -128,12 +120,8 @@ def executar(args: argparse.Namespace, *, update: bool = False) -> int:
         args.base_dir = os.path.dirname(os.path.abspath(args.base_dir))
     if update:
         args.reprocess = True
-    usa_opcao_hibrida = (
-        args.exigir_isrc or args.exigir_artista_musicbrainz
-        or args.preferir != "youtube" or args.revisar != "all"
-    )
-    if usa_opcao_hibrida and not args.modelo_hibrido:
-        print("Aviso: --no-hybrid ignora --prefer-db/--review/--require-*.")
+    if args.revisar not in ("errors", "diff") and not args.modelo_hibrido:
+        print("Aviso: --no-hybrid ignora --review.")
     args.state_file = args.downloads_db
     args.cookies_ytdlp = cookies_ytdlp(args)
     return pltube.executar(args)

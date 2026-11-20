@@ -68,19 +68,19 @@ Guarda o caminho relativo do antigo `pltube_state.sqlite3` e a data em que foi m
 
 A linha é criada quando os metadados da faixa são preparados, antes de o download do áudio terminar. Campos importantes ficam em colunas pesquisáveis, e os objetos JSON conservam as informações mais detalhadas. A proveniência informa de onde veio cada campo, por exemplo `youtube`, `local`, `musicbrainz`, `youtube_validado_musicbrainz` ou `manual`.
 
-### `metadata_resolution` — resultado completo do modo híbrido
+### `metadata_resolution` — resultado completo da identificação
 
 | video_key | video_id | status | result_json | audio_path | updated_at |
 |---|---|---|---|---|---|
 | `youtube:abc123` | `abc123` | `PENDENTE` | JSON da resolução | `../songs/Artista A/musica1.mp3` | `2026-11-18 18:47:00` |
 
-`result_json` preserva os dados de origem, metadados escolhidos, campos pendentes, candidatos MusicBrainz e diagnósticos separados por fonte. `audio_path` é relativo à pasta do banco de downloads, não é um caminho absoluto do computador.
+`result_json` preserva os dados de origem, metadados escolhidos, a fonte de cada campo, os sinais de erro e a sugestão do YouTube Music. `audio_path` é relativo à pasta do banco de downloads, não é um caminho absoluto do computador.
 
 Exemplo abreviado do JSON:
 
 ```json
 {
-  "status": "PENDENTE",
+  "status": "OBSERVAR",
   "metadata": {
     "title": "Canção Exemplo",
     "artists": ["Artista A", "Artista B"],
@@ -100,20 +100,16 @@ Exemplo abreviado do JSON:
     "isrc": "USAAA9900001"
   },
   "provenance": {
-    "title": "musicbrainz",
-    "artists": "musicbrainz",
-    "album": "musicbrainz"
+    "title": "youtube_music_busca",
+    "artists": "youtube_music_busca",
+    "album": "youtube_music_busca"
   },
-  "diagnostics_by_source": {
-    "youtube": ["yt-dlp/YouTube não forneceu um ISRC válido"],
-    "local": ["ISRC recuperado das tags locais do MP3"],
-    "musicbrainz": ["MusicBrainz não encontrou uma correspondência"]
-  },
-  "pending_reasons": ["álbum associado a mais de uma edição possível"]
+  "observations": ["título com sobras do vídeo: 'Canção Exemplo (Lyrics)'"],
+  "pending_reasons": []
 }
 ```
 
-Os avisos do yt-dlp/YouTube, das tags locais e do MusicBrainz são registros locais no SQLite e, para faixas pendentes, no CSV de revisão. O programa não escreve alterações de volta no YouTube.
+As fontes possíveis são `youtube_music` (faixa oficial), `youtube_music_descricao`, `youtube_music_clipe`, `youtube_creditos`, `youtube_music_busca`, `titulo`, `canal`, `local`, `banco_isrc` e `manual` (correção sua). Tudo fica só no SQLite local. O programa não escreve alterações de volta no YouTube.
 
 ## Consultas de exemplo
 
@@ -149,8 +145,9 @@ Apagar os bancos remove cache, progresso e metadados locais, mas não apaga CSVs
 
 ## Conferência e memória (em `musicas.sqlite3`)
 
-- `music_tracks.metadata_status`: `RESOLVIDO`, `OBSERVAR` (conferir) ou `PENDENTE` (falta artista ou um requisito `--require-*`).
-- `music_tracks.review_note`: o motivo da conferência, por exemplo "título diverge: YouTube='…' / MusicBrainz='…'" ou "álbum não encontrado".
+- `music_tracks.metadata_status`: `RESOLVIDO`, `OBSERVAR` (sinal de erro para conferir) ou `PENDENTE` (falta o artista).
+- `music_tracks.review_note`: o sinal de erro, por exemplo "artista parece canal de re-upload, selo ou trilha: 'Lyrics Hub'".
+- `artistas.sqlite3` (anexado como `artistas`): `artistas` (nome certo) e `variantes` (outras grafias), usados pelo comando `artists`.
 - `channel_votes`: o que o programa aprendeu sobre cada canal. É um voto por vídeo confirmado: `artista` (o canal é do artista) ou `curador` (re-upload/gravadora/lyrics). A maioria decide.
 
 ```bash

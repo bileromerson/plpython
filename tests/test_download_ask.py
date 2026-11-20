@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
 
 class IsrcNoBancoTests(unittest.TestCase):
-    def test_mesmo_isrc_usa_faixa_confirmada_sem_musicbrainz(self):
+    def test_mesmo_isrc_usa_faixa_confirmada_sem_consultar_nada(self):
         with tempfile.TemporaryDirectory() as tmp:
             con = pltube.abrir_banco_estado(os.path.join(tmp, "d.sqlite3"), os.path.join(tmp, "m.sqlite3"))
             confirmada = {"status": "RESOLVIDO", "video_id": "aaaaaaaaaaa",
@@ -62,7 +62,7 @@ class IsrcNoBancoTests(unittest.TestCase):
             pltube._salvar_metadados_musica(con, "youtube:aaaaaaaaaaa", confirmada)
             con.commit()
             cliente = mock.Mock()
-            with mock.patch.object(pltube, "MUSICBRAINZ_CLIENT", cliente), \
+            with mock.patch.object(pltube, "YTMUSIC", cliente), \
                     mock.patch.object(pltube, "ARTISTAS_CONHECIDOS", []):
                 meta, res = pltube.resolver_meta_hibrido(
                     {"id": "zzzzzzzzzzz", "title": "believer lyrics 1 hour", "uploader": "Lyrics Hub",
@@ -72,4 +72,4 @@ class IsrcNoBancoTests(unittest.TestCase):
         self.assertEqual((res["metadata"]["title"], res["metadata"]["artists"], res["metadata"]["album"]),
                          ("Believer", ["Imagine Dragons"], "Evolve"))
         self.assertEqual(res["provenance"]["artists"], "banco_isrc")
-        cliente.search_by_isrc.assert_not_called()
+        self.assertEqual(cliente.mock_calls, [])  # nem consulta o YouTube Music

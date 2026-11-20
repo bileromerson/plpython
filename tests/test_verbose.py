@@ -1,5 +1,7 @@
 import contextlib
 import io
+import os
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -61,16 +63,18 @@ class VerboseTests(unittest.TestCase):
             self.assertEqual(self.capturar(0, lambda: pltube.registrar_erro("u", "falhou x")), "")
             self.assertIn("[Erro] falhou x", self.capturar(1, lambda: pltube.registrar_erro("u", "falhou x")))
 
-    def test_comparacao_youtube_x_banco_no_v(self):
-        import resolvedor_metadados as r
-        from test_modelo_identificacao import FakeMB, gravacao, release
-        saida = self.capturar(1, lambda: r.resolver_com_prioridade(
-            "v", {"title": "Get Lucky Remix", "artists": ["Daft Punk"], "duration": 200},
-            musicbrainz_client=FakeMB([gravacao("Get Lucky", ["Daft Punk"], [release(1, "RAM", artistas=["Daft Punk"])])])))
-        self.assertIn("título: YouTube 'Get Lucky Remix' ≠ banco 'Get Lucky' → não bate; preferência youtube", saida)
-        self.assertIn("artista: YouTube 'Daft Punk' = banco 'Daft Punk' → bate", saida)
-        self.assertIn("[Resultado] OBSERVAR", saida)
-
+    def test_identificacao_no_v(self):
+        import identificar_musica as im
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from ytm_falso import YTMFalso, faixa
+        api = YTMFalso(catalogo=[faixa("aaaaaaaaaaa", "Believer", ["Imagine Dragons"], album="Evolve", segundos=204)])
+        saida = self.capturar(2, lambda: im.identificar(
+            {"id": "vvvvvvvvvvv", "title": "Believer - Imagine Dragons (Lyrics)", "uploader": "Lyrics Hub", "duration": 205},
+            cliente=im.ClienteYTMusic(api, pausa=0)))
+        self.assertIn("[YouTube Music] busca 'Believer Imagine Dragons'", saida)
+        self.assertIn("[Identificação] RESOLVIDO: Imagine Dragons — Believer | álbum Evolve (catálogo do YouTube Music)", saida)
+        saida = self.capturar(1, lambda: im.identificar({"id": "x", "title": "Mix 1 hour", "uploader": "Lofi Hits", "duration": 3600}))
+        self.assertIn("conferir: vídeo longo", saida)
 
 if __name__ == "__main__":
     unittest.main()

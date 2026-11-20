@@ -98,9 +98,9 @@ def descrever_conta(cookies: dict) -> str:
 def opcoes_verbose(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "-v", "--verbose", dest="verbose", action="count", default=0,
-        help="mostra detalhes, como no nmap: -v (erros silenciosos, consultas ao SQL/YouTube/"
-             "MusicBrainz, YouTube x banco), -vv (tudo: hipóteses, metadados campo a campo, tags), "
-             "-vvv (também a depuração do yt-dlp)",
+        help="mostra detalhes, como no nmap: -v (erros silenciosos, consultas ao SQL/YouTube, de onde "
+             "veio o artista e os sinais de erro), -vv (tudo: busca no YouTube Music, metadados campo a "
+             "campo, tags), -vvv (também a depuração do yt-dlp)",
     )
 
 
