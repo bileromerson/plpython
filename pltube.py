@@ -48,19 +48,14 @@ LOG_FILE = os.path.join(WORK_DIR, "Logs.txt")
 ROW = 2
 ARTIST_LINKS = False
 ESPERAR_BLOQUEIO = False
-MODELO_HIBRIDO = False
-REVISAR = "errors"  # errors (só sinais fortes de erro) | all (também o que foi deduzido) | none
-STATUS_REVISAO = ("PENDENTE", "OBSERVAR")
+CONFIRMADO = identificar_musica.CONFIRMADO
+NAO_CONFIRMADO = identificar_musica.NAO_CONFIRMADO
+STATUS_REVISAO = (NAO_CONFIRMADO,)
 YTMUSIC: identificar_musica.ClienteYTMusic | None = None
-FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução sem dados confirmados
+FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução não confirmadas
 ARTISTAS_DB = ""  # --artists-db; vazio = artistas.sqlite3 ao lado do banco de músicas
-ARTISTAS_CONHECIDOS: list[str] = []  # artistas já confirmados na biblioteca (aprendidos)
+ARTISTAS_CONHECIDOS: list[str] = []  # nomes e variações do banco de artistas
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
-# Artista vindo de quem publica a música (e correções suas); faixas de downloads antigos
-# confirmadas pelo MusicBrainz continuam valendo.
-FONTES_ARTISTA_CONFIRMADO = identificar_musica.FONTES_CONFIAVEIS | {
-    "manual", "banco_isrc", "musicbrainz", "youtube_validado_musicbrainz",
-}
 # Falhas de rede/servidor (502/503, timeout): somem em segundos ou minutos.
 MAX_TENTATIVAS_BLOQUEIO = 6
 ESPERA_INICIAL_SEGUNDOS = 30
@@ -86,8 +81,8 @@ MAX_INFO_YOUTUBE = 50
 def verificar_diretorios(args: argparse.Namespace) -> None:
     """--csvfile aponta para os CSVs; diretórios de saída ficam na pasta de execução."""
     global BASE_DIR, WORK_DIR, SONGS_DIR, PLAYLISTS_DIR, LOG_FILE, ROW, ARTIST_LINKS
-    global ESPERAR_BLOQUEIO, MODELO_HIBRIDO, PAUSA_YOUTUBE, COOKIES_YTDLP
-    global REVISAR, ARTISTAS_DB
+    global ESPERAR_BLOQUEIO, PAUSA_YOUTUBE, COOKIES_YTDLP
+    global ARTISTAS_DB
 
     caminho_csv = os.path.abspath(args.base_dir or os.getcwd())
     if os.path.isfile(caminho_csv):
@@ -110,12 +105,10 @@ def verificar_diretorios(args: argparse.Namespace) -> None:
     ROW = args.row
     ARTIST_LINKS = args.artist_links
     ESPERAR_BLOQUEIO = args.esperar_bloqueio
-    MODELO_HIBRIDO = args.modelo_hibrido
     COOKIES_YTDLP = dict(getattr(args, "cookies_ytdlp", None) or {})
     pausa = getattr(args, "pausa", None)
     if pausa is not None:
         PAUSA_YOUTUBE = tuple(pausa)
-    REVISAR = {"diff": "errors"}.get(getattr(args, "revisar", None) or "errors", getattr(args, "revisar", None) or "errors")
     ARTISTAS_DB = os.path.abspath(args.artists_db) if getattr(args, "artists_db", None) else ""
 
 
@@ -564,6 +557,8 @@ def abrir_banco_estado(
         conexao.execute(
             "ALTER TABLE music.music_tracks ADD COLUMN review_note TEXT NOT NULL DEFAULT ''"
         )
+    migrar_status(conexao)
+    aplicar_confirmacoes_do_sql(conexao)
     # Compatibilidade de leitura com chamadas antigas e ferramentas locais.
     conexao.execute(
         "CREATE TEMP VIEW IF NOT EXISTS metadata_resolution AS "
@@ -571,6 +566,58 @@ def abrir_banco_estado(
     )
     conexao.commit()
     return conexao
+
+
+STATUS_ANTIGOS = {"RESOLVIDO": "CONFIRMADO", "OBSERVAR": "NAO_CONFIRMADO", "PENDENTE": "NAO_CONFIRMADO"}
+
+
+def migrar_status(conexao: sqlite3.Connection) -> None:
+    """Status do modelo antigo (RESOLVIDO/OBSERVAR/PENDENTE) viram CONFIRMADO/NAO_CONFIRMADO."""
+    for antigo, novo in STATUS_ANTIGOS.items():
+        conexao.execute("UPDATE music.music_tracks SET metadata_status = ? WHERE metadata_status = ?", (novo, antigo))
+        conexao.execute(
+            "UPDATE music.metadata_resolution SET status = ?, result_json = json_set(result_json, '$.status', ?) "
+            "WHERE status = ?", (novo, novo, antigo))
+
+
+def aplicar_confirmacoes_do_sql(conexao: sqlite3.Connection) -> int:
+    """Você confere no SQL: em music.music_tracks, troque metadata_status para CONFIRMADO
+    (e, se precisar, corrija title e artists_json). Na próxima execução isso vale para a
+    identificação salva, os artistas entram no banco de artistas e o `update` move o MP3
+    para a pasta certa e regrava as tags."""
+    import banco_artistas
+
+    linhas = conexao.execute(
+        """SELECT t.video_key, t.title, t.artists_json, r.result_json
+           FROM music.music_tracks t JOIN music.metadata_resolution r ON r.video_key = t.video_key
+           WHERE t.metadata_status = 'CONFIRMADO' AND r.status != 'CONFIRMADO'"""
+    ).fetchall()
+    for linha in linhas:
+        try:
+            resultado = json.loads(linha["result_json"])
+            artistas = [str(a).strip() for a in json.loads(linha["artists_json"] or "[]") if str(a).strip()]
+        except (TypeError, ValueError):
+            continue
+        metadata = resultado.setdefault("metadata", {})
+        if linha["title"]:
+            metadata["title"] = linha["title"]
+        if artistas:
+            metadata["artists"], metadata["artist"] = artistas, artistas[0]
+        resultado["status"] = CONFIRMADO
+        resultado["observations"] = []
+        resultado.setdefault("provenance", {})["artists"] = "manual"
+        resultado["confidence"] = {"title": "confirmada_manual", "artists": "confirmada_manual"}
+        resultado["manual_review"] = {"fields": ["title", "artists"], "confirmed": True, "via": "sql"}
+        conexao.execute(
+            "UPDATE music.metadata_resolution SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE video_key = ?", (CONFIRMADO, json.dumps(resultado, ensure_ascii=False), linha["video_key"]))
+        conexao.execute("UPDATE music.music_tracks SET metadata_json = ?, review_note = '' WHERE video_key = ?",
+                        (json.dumps(resultado, ensure_ascii=False), linha["video_key"]))
+        for nome in artistas:
+            banco_artistas.adicionar(conexao, nome, "manual")
+    if linhas:
+        print(f"{len(linhas)} faixa(s) confirmada(s) por você no SQL; rode o update para mover/regravar os MP3.")
+    return len(linhas)
 
 
 def migrar_banco_legado(
@@ -839,7 +886,7 @@ def _salvar_metadados_musica(
         existente = conexao.execute(
             "SELECT status FROM music.metadata_resolution WHERE video_key = ?", (video_key,)
         ).fetchone()
-        track_status = existente[0] if existente else "NAO_VALIDADO"
+        track_status = existente[0] if existente else NAO_CONFIRMADO
     values = (
         video_key,
         str(metadata.get("id") or dados.get("video_id") or ""),
@@ -901,7 +948,7 @@ def salvar_resolucao(
         (
             video_key,
             str(resultado.get("video_id") or ""),
-            str(resultado.get("status") or "PENDENTE"),
+            str(resultado.get("status") or NAO_CONFIRMADO),
             json.dumps(resultado, ensure_ascii=False),
             _caminho_relativo_banco(audio_path, conexao),
         ),
@@ -932,84 +979,18 @@ def meta_do_resultado_hibrido(resultado: dict[str, Any]) -> dict[str, Any]:
         "isrc": str(campos.get("isrc") or ""),
         "uploader": str(campos.get("uploader") or origem.get("uploader") or ""),
         "thumbnail": str(campos.get("thumbnail_url") or origem.get("thumbnail_url") or ""),
-        "hybrid_status": str(resultado.get("status") or "PENDENTE"),
+        "hybrid_status": str(resultado.get("status") or NAO_CONFIRMADO),
     }
 
 
-def chave_canal(dados: dict[str, Any]) -> str:
-    """Identificador estável do canal: o ID do YouTube ou, sem ele, o nome limpo."""
-    if dados.get("channel_id"):
-        return "youtube:" + str(dados["channel_id"])
-    nome = _nome_canal_limpo(str(dados.get("uploader") or ""))
-    return ("nome:" + nome.casefold()) if nome else ""
-
-
-def perfil_canal(conexao: sqlite3.Connection | None, chave: str) -> dict[str, Any] | None:
-    """O que já se sabe do canal: maioria dos votos entre "artista" e "curador"."""
-    if conexao is None or not chave:
-        return None
-    linhas = conexao.execute(
-        "SELECT kind, artist, COUNT(*) AS n FROM music.channel_votes WHERE channel_key = ? "
-        "GROUP BY kind, artist ORDER BY n DESC",
-        (chave,),
-    ).fetchall()
-    if not linhas:
-        return None
-    votos = {"artista": 0, "curador": 0}
-    artistas: dict[str, int] = {}
-    for linha in linhas:
-        votos[linha["kind"]] = votos.get(linha["kind"], 0) + linha["n"]
-        if linha["kind"] == "artista" and linha["artist"]:
-            artistas[linha["artist"]] = artistas.get(linha["artist"], 0) + linha["n"]
-    vv("SQL", f"canal {chave}: votos {votos}")
-    if votos["artista"] == votos["curador"]:
-        return None
-    tipo = "artista" if votos["artista"] > votos["curador"] else "curador"
-    principal = max(artistas, key=artistas.get) if artistas else ""
-    v("SQL", f"canal já conhecido: {'do artista ' + principal if tipo == 'artista' else 're-upload/curadoria'} "
-             f"({votos['artista']} x {votos['curador']} votos)")
-    return {"kind": tipo, "artists": [principal] if principal and tipo == "artista" else [], "votos": votos}
-
-
-def aprender_canal(conexao: sqlite3.Connection | None, video_key: str, resultado: dict[str, Any]) -> None:
-    """Quando o artista está confirmado, registra se o canal é do artista ou um re-upload.
-
-    Um voto por vídeo; a decisão é pela maioria, então um erro isolado não estraga
-    o que foi aprendido.
-    """
-    if conexao is None:
-        return
-    metadata = resultado.get("metadata") or {}
-    origem = resultado.get("source_youtube") or {}
-    if (resultado.get("provenance") or {}).get("artists") not in FONTES_ARTISTA_CONFIRMADO:
-        return
-    uploader = str(metadata.get("uploader") or origem.get("uploader") or "")
-    if not uploader or re.search(r"-\s*topic\s*$", uploader, re.I):
-        return
-    nome = _nome_canal_limpo(uploader)
-    chave = chave_canal({"channel_id": metadata.get("channel_id") or origem.get("channel_id"), "uploader": uploader})
-    artistas = [str(a) for a in metadata.get("artists") or []]
-    if not nome or not chave or not artistas:
-        return
-    artista = next((a for a in artistas if _mesmo_nome(nome, a)), "")
-    v("SQL", f"aprendido: canal '{nome}' é " + (f"do artista {artista}" if artista else "re-upload/curadoria"))
-    conexao.execute(
-        """INSERT INTO music.channel_votes (channel_key, video_key, channel_name, kind, artist)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(channel_key, video_key) DO UPDATE SET
-           kind=excluded.kind, artist=excluded.artist, channel_name=excluded.channel_name,
-           updated_at=CURRENT_TIMESTAMP""",
-        (chave, video_key, nome, "artista" if artista else "curador", artista),
-    )
-
-
 def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str]:
-    """Artistas de faixas já resolvidas: ajudam a saber qual lado de "A - B" é o artista."""
+    """Artistas de faixas confirmadas e do banco de artistas: os "nomes possíveis" do título
+    são procurados aqui antes de ir à web."""
     if conexao is None:
         return []
     nomes: dict[str, None] = {}
     for (artistas_json,) in conexao.execute(
-        "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'RESOLVIDO'"
+        "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'CONFIRMADO'"
     ).fetchall():
         try:
             for nome in json.loads(artistas_json or "[]"):
@@ -1037,13 +1018,11 @@ def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str
 
 
 def aprender_artistas(conexao: sqlite3.Connection | None, resultado: dict[str, Any], origem: str) -> None:
-    """Artistas de uma faixa confirmada vão para o banco de artistas."""
+    """Artistas de uma faixa CONFIRMADA vão para o banco de artistas (as NAO_CONFIRMADO não)."""
     import banco_artistas
 
-    if not banco_artistas.anexado(conexao) or (resultado or {}).get("status") != "RESOLVIDO":
+    if not banco_artistas.anexado(conexao) or (resultado or {}).get("status") != CONFIRMADO:
         return
-    if (resultado.get("provenance") or {}).get("artists") not in banco_artistas.FONTES_CONFIAVEIS:
-        return  # deduzido do título/canal: não vira artista "conhecido"
     try:
         for nome in (resultado.get("metadata") or {}).get("artists") or []:
             banco_artistas.adicionar(conexao, nome, origem)
@@ -1053,53 +1032,7 @@ def aprender_artistas(conexao: sqlite3.Connection | None, resultado: dict[str, A
 
 
 def artista_confiavel(resultado: dict[str, Any] | None) -> bool:
-    if not resultado or resultado.get("status") == "PENDENTE":
-        return False
-    if (resultado.get("provenance") or {}).get("artists") in FONTES_ARTISTA_CONFIRMADO:
-        return True
-    return resultado.get("status") == "RESOLVIDO"
-
-
-CAMPOS_DO_ISRC = ("title", "artists", "artist", "album", "album_artists", "date", "label", "track_number",
-                  "track_total", "disc_number", "disc_total", "musicbrainz_recording_id",
-                  "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_artist_ids",
-                  "cover_url", "cover_source")
-
-
-def faixa_pelo_isrc(estado: sqlite3.Connection | None, isrc: str, video_id: str) -> dict[str, Any] | None:
-    """Faixa já confirmada (RESOLVIDO) com o mesmo ISRC, de outro vídeo."""
-    if estado is None or not isrc:
-        return None
-    try:
-        linhas = estado.execute(
-            "SELECT video_key FROM music.music_tracks WHERE isrc = ? AND metadata_status = 'RESOLVIDO' "
-            "AND video_id != ? ORDER BY updated_at DESC", (isrc, video_id),
-        ).fetchall()
-    except sqlite3.Error:
-        return None
-    for linha in linhas:
-        salvo = carregar_resolucao(estado, linha[0])
-        if salvo and (salvo["result"].get("metadata") or {}).get("artists"):
-            v("SQL", f"ISRC {isrc} já está no banco: {linha[0]}")
-            return salvo["result"]
-    return None
-
-
-def usar_faixa_do_isrc(resultado: dict[str, Any], conhecida: dict[str, Any], isrc: str) -> None:
-    """Mesmo ISRC = mesma gravação: os dados confirmados do banco valem para este vídeo."""
-    metadata = resultado.setdefault("metadata", {})
-    provenance = resultado.setdefault("provenance", {})
-    confidence = resultado.setdefault("confidence", {})
-    origem = conhecida.get("metadata") or {}
-    for campo in CAMPOS_DO_ISRC:
-        if origem.get(campo) not in (None, "", []):
-            metadata[campo] = copy.deepcopy(origem[campo])
-            provenance[campo] = "banco_isrc"
-            confidence[campo] = "confirmada"
-    metadata["isrc"], provenance["isrc"], confidence["isrc"] = isrc, "banco_isrc", "confirmada"
-    resultado["status"] = "RESOLVIDO"
-    resultado["pending_reasons"] = []
-    resultado.setdefault("diagnostics", []).append(f"ISRC {isrc} igual ao de uma faixa já confirmada no banco")
+    return bool(resultado) and resultado.get("status") == CONFIRMADO
 
 
 def resolver_meta_hibrido(
@@ -1110,26 +1043,20 @@ def resolver_meta_hibrido(
     estado: sqlite3.Connection | None = None,
     forcar: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    progresso.etapa("identificando artista, álbum e capa")
-    # 1º o código da música (ISRC): se outra faixa já confirmada tem o mesmo, é a mesma gravação
-    isrc = normalize_isrc(meta.get("isrc") or (dados_locais or {}).get("isrc"))
-    conhecida = faixa_pelo_isrc(estado, isrc, str(meta.get("id") or "")) if isrc else None
-    resultado = identificar_musica.identificar(
-        meta,
-        cliente=None if conhecida else YTMUSIC,  # já confirmada pelo ISRC: não precisa consultar
-        conhecidos=ARTISTAS_CONHECIDOS,
-        canal_conhecido=perfil_canal(estado, chave_canal(meta)),
-        dados_locais=dados_locais,
-        sem_dados_youtube=sem_dados_youtube,
-        revisar=REVISAR,
-        forcar=forcar,
-    )
-    if conhecida:
-        usar_faixa_do_isrc(resultado, conhecida, isrc)
+    """Identifica o artista: fonte oficial do YouTube, senão os nomes possíveis do título/canal
+    procurados no banco de artistas e depois na web (YouTube Music)."""
     import banco_artistas
 
-    for de, para in banco_artistas.corrigir_resultado(estado, resultado):
-        v("SQL", f"banco de artistas: {de} → {para}")
+    progresso.etapa("identificando o artista")
+    resultado = identificar_musica.identificar(
+        meta,
+        cliente=YTMUSIC,
+        no_banco=lambda nome: banco_artistas.canonico(estado, nome),
+        conhecidos=ARTISTAS_CONHECIDOS,
+        dados_locais=dados_locais,
+        sem_dados_youtube=sem_dados_youtube,
+        forcar=forcar,
+    )
     return meta_do_resultado_hibrido(resultado), resultado
 
 
@@ -1232,12 +1159,10 @@ def aplicar_tags_hibridas(audio_path: str, resultado: dict[str, Any]) -> bool:
                     extra("PLTUBE_COVER", "thumbnail-recortada")
                     v("Capa", "sem capa do álbum: thumbnail do vídeo recortada para quadrada")
 
-        status = str(resultado.get("status") or "PENDENTE")
+        status = str(resultado.get("status") or NAO_CONFIRMADO)
         extra("PLTUBE_METADATA_STATUS", status)
-        extra("PLTUBE_METADATA_NOTE", {
-            "PENDENTE": "Metadados provisórios; podem estar incorretos. Consulte: plpython.py review",
-            "OBSERVAR": "Confira título/artista/álbum: plpython.py review",
-        }.get(status, "Metadados conferidos pelo plpython."))
+        extra("PLTUBE_METADATA_NOTE", "Artista confirmado." if status == CONFIRMADO else
+              "Artista não confirmado: confira em sql/musicas.sqlite3 (music_tracks).")
         extra("PLTUBE_METADATA_REVIEW", " | ".join(
             (resultado.get("pending_reasons") or []) + (resultado.get("observations") or [])
         ))
@@ -1323,11 +1248,7 @@ def extrair_metadados(url: str, csv_file: str = "") -> dict[str, Any] | None:
 
     def montar_metadados() -> dict[str, Any]:
         info = obter_info()
-        artistas = normalizar_artistas(
-            info, permitir_uploader=not MODELO_HIBRIDO
-        )
-        if not artistas and not MODELO_HIBRIDO:
-            raise RuntimeError("O YouTube não informou o artista deste vídeo.")
+        artistas = normalizar_artistas(info, permitir_uploader=False)
         descricao = str(info.get("description") or "")
         if verbose.ativo(2):
             vv("YouTube", f"  título do vídeo: {info.get('title')!r}")
@@ -1612,10 +1533,7 @@ def baixar_musica(
     safe_id = nome_seguro(video_id, "sem-id") if video_id else "sem-id"
     filename = f"{safe_title} [{safe_id}].mp3"
 
-    # A primeira posição dos créditos disponíveis define a pasta física, mesmo
-    # quando provisórios. Se nenhum artista veio do vídeo/base, usa a pasta
-    # explícita de fallback; o uploader nunca é promovido no modo híbrido.
-    pendente = bool(hybrid_result and hybrid_result.get("status") == "PENDENTE")
+    # O primeiro artista define a pasta, confirmado ou não.
     artista_principal = pasta_do_artista(artists[0])
     if artista_principal.casefold() in {"_pendentes", "_observar", "_library"}:
         artista_principal = "Artista Desconhecido"
@@ -1670,11 +1588,7 @@ def baixar_musica(
 
     if hybrid_result:
         aplicar_tags_hibridas(filepath_mp3, hybrid_result)
-    if pendente:
-        # `_pendentes` é apenas uma entrada de navegação; o MP3 físico fica
-        # junto ao artista e o link não cria uma segunda cópia do áudio.
-        criar_link_artista(filepath_mp3, "_pendentes")
-    elif ARTIST_LINKS:
+    if ARTIST_LINKS:
         for nome in artists:
             criar_link_artista(filepath_mp3, nome)
     return filepath_mp3
@@ -1820,15 +1734,12 @@ def _processar_csv(
             start_row = int(salvo["next_row"])
             if salvo["complete"]:
                 itens_salvos = listar_itens_playlist(estado, state_key)
-                precisa_resolver_hibrido = False
-                if MODELO_HIBRIDO:
-                    sem_resolucao = estado.execute(
-                        """SELECT 1 FROM playlist_items p
-                           LEFT JOIN metadata_resolution r ON r.video_key = p.video_key
-                           WHERE p.csv_path = ? AND r.video_key IS NULL LIMIT 1""",
-                        (state_key,),
-                    ).fetchone()
-                    precisa_resolver_hibrido = bool(sem_resolucao)
+                precisa_resolver_hibrido = bool(estado.execute(
+                    """SELECT 1 FROM playlist_items p
+                       LEFT JOIN metadata_resolution r ON r.video_key = p.video_key
+                       WHERE p.csv_path = ? AND r.video_key IS NULL LIMIT 1""",
+                    (state_key,),
+                ).fetchone())
                 if (
                     all(os.path.isfile(item[3]) for item in itens_salvos)
                     and not precisa_resolver_hibrido
@@ -1837,7 +1748,7 @@ def _processar_csv(
                     escrever_playlist(m3u_path, itens_salvos, csv_file, append)
                     return True
                 if precisa_resolver_hibrido:
-                    print(f"Aplicando o modelo híbrido a itens já baixados de {csv_file}")
+                    print(f"Identificando o artista de itens já baixados de {csv_file}")
                     start_row = 0
                 else:
                     print(f"Um arquivo do cache não existe; retomando o CSV: {csv_file}")
@@ -1897,9 +1808,9 @@ def _processar_csv(
                                 ).get("local_metadata")
                                 resolucao_salva = (
                                     carregar_resolucao(estado, video_key)
-                                    if MODELO_HIBRIDO and estado is not None else None
+                                    if estado is not None else None
                                 )
-                                precisa_youtube = MODELO_HIBRIDO and reprocess and not (
+                                precisa_youtube = reprocess and not (
                                     resolucao_salva and (
                                         resolucao_salva["result"].get("status") not in STATUS_REVISAO
                                         or (resolucao_salva["result"].get("manual_review") or {}).get("fields")
@@ -1960,7 +1871,7 @@ def _processar_csv(
                                             error="Não foi possível obter os metadados",
                                         )
 
-                            if meta and MODELO_HIBRIDO:
+                            if meta:
                                 salvo_hibrido = (
                                     carregar_resolucao(estado, video_key)
                                     if estado is not None else None
@@ -1992,22 +1903,18 @@ def _processar_csv(
                                         sem_dados_youtube=sem_dados_youtube,
                                         estado=estado,
                                     )
-                                    if hybrid_result.get("status") == "RESOLVIDO":
+                                    if hybrid_result.get("status") == CONFIRMADO:
                                         for nome in meta.get("artists") or []:
                                             if nome not in ARTISTAS_CONHECIDOS:
                                                 ARTISTAS_CONHECIDOS.append(nome)
                                         aprender_artistas(estado, hybrid_result, "download")
                                     if estado is not None:
-                                        aprender_canal(estado, video_key, hybrid_result)
                                         salvar_resolucao(estado, video_key, hybrid_result)
-                                        if hybrid_result.get("status") in ("PENDENTE", "OBSERVAR") \
+                                        if hybrid_result.get("status") == NAO_CONFIRMADO \
                                                 and video_key not in FAIXAS_PARA_PERGUNTAR:
                                             FAIXAS_PARA_PERGUNTAR.append(video_key)
                                 if estado is not None and hybrid_result:
                                     _salvar_metadados_musica(estado, video_key, hybrid_result)
-
-                            if meta and estado is not None and not MODELO_HIBRIDO:
-                                _salvar_metadados_musica(estado, video_key, meta)
 
                             if meta and music_path and hybrid_result:
                                 if artista_confiavel(hybrid_result):
@@ -2017,7 +1924,7 @@ def _processar_csv(
                                 aplicar_tags_hibridas(music_path, hybrid_result)
 
                             if (
-                                meta and hybrid_result and MODELO_HIBRIDO
+                                meta and hybrid_result
                                 and estado is not None and not music_path
                             ):
                                 salvar_video_cache(
@@ -2033,31 +1940,14 @@ def _processar_csv(
                                             video_id=meta.get("id") or video_id,
                                         )
                                         estado.commit()
-                                    if MODELO_HIBRIDO:
-                                        music_path = baixar_musica(
-                                            url, meta["artists"], meta["title"], meta["id"],
-                                            csv_file, hybrid_result=hybrid_result,
-                                        )
-                                    else:
-                                        if estado is not None:
-                                            salvar_video_cache(
-                                                estado, video_key, url, "metadata", meta
-                                            )
-                                            estado.commit()
-                                        music_path = baixar_musica(
-                                            url, meta["artists"], meta["title"], meta["id"], csv_file
-                                        )
+                                    music_path = baixar_musica(
+                                        url, meta["artists"], meta["title"], meta["id"],
+                                        csv_file, hybrid_result=hybrid_result,
+                                    )
                                 except BloqueioTemporarioYouTube:
                                     print("Interrompendo esta playlist para evitar novas requisições durante o bloqueio.")
                                     bloqueado = True
                                     break
-
-                            if music_path and hybrid_result:
-                                pasta_revisao = {
-                                    "PENDENTE": "_pendentes", "OBSERVAR": "_observar",
-                                }.get(hybrid_result.get("status"))
-                                if pasta_revisao:
-                                    criar_link_artista(music_path, pasta_revisao)
 
                             if music_path and estado is not None and meta:
                                 salvar_video_cache(
@@ -2089,10 +1979,7 @@ def _processar_csv(
                                     video_id=meta.get("id") or video_id, path=music_path,
                                 )
 
-                        if (
-                            music_path and meta and ARTIST_LINKS
-                            and not (hybrid_result and hybrid_result.get("status") == "PENDENTE")
-                        ):
+                        if music_path and meta and ARTIST_LINKS:
                             for artista in meta["artists"]:
                                 criar_link_artista(music_path, artista)
                         if music_path and meta and estado is not None:
@@ -2122,14 +2009,14 @@ def _processar_csv(
 
 
 def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> None:
-    """download --ask: as faixas desta execução com sinal de erro (ou sem artista) viram
-    pergunta no fim, só nos campos apontados."""
+    """download --ask: no fim, pergunta o artista/título das faixas desta execução que
+    ficaram NAO_CONFIRMADO."""
     if not FAIXAS_PARA_PERGUNTAR:
         return
     chaves = {
         k for k in FAIXAS_PARA_PERGUNTAR
         if (estado.execute("SELECT status FROM music.metadata_resolution WHERE video_key = ?", (k,))
-            .fetchone() or [""])[0] in ("PENDENTE", "OBSERVAR")
+            .fetchone() or [""])[0] == NAO_CONFIRMADO
     }
     if not chaves:
         return
@@ -2139,7 +2026,7 @@ def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> 
         return
     from comandos import review
 
-    print(f"\n{len(chaves)} faixa(s) desta execução têm sinal de erro no artista ou no título. "
+    print(f"\n{len(chaves)} faixa(s) desta execução ficaram com o artista não confirmado. "
           "Corrija o que estiver errado; :s pula a faixa, :q termina.\n")
     opcoes = review.criar_parser().parse_args([])
     opcoes.responder = True
@@ -2154,7 +2041,7 @@ def executar(args: argparse.Namespace) -> int:
     """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
     global YTMUSIC
     verificar_diretorios(args)
-    YTMUSIC = identificar_musica.ClienteYTMusic() if MODELO_HIBRIDO else None
+    YTMUSIC = identificar_musica.ClienteYTMusic()
     criar_diretorios()
 
     if args.lista:
@@ -2224,14 +2111,14 @@ def executar(args: argparse.Namespace) -> int:
         return 130
     finally:
         progresso.encerrar()
-        if MODELO_HIBRIDO:
-            try:
-                total_pendentes = estado.execute(
-                    "SELECT COUNT(*) FROM metadata_resolution WHERE status IN ('PENDENTE', 'OBSERVAR')"
-                ).fetchone()[0]
-                if total_pendentes:
-                    print(f"{total_pendentes} faixa(s) com sinal de erro para conferir: plpython.py review --answer")
-            except sqlite3.Error as exc:
-                print(f"Não foi possível contar as faixas para conferir: {exc}")
+        try:
+            total_pendentes = estado.execute(
+                "SELECT COUNT(*) FROM metadata_resolution WHERE status = 'NAO_CONFIRMADO'"
+            ).fetchone()[0]
+            if total_pendentes:
+                print(f"{total_pendentes} faixa(s) com artista NAO_CONFIRMADO: confira em "
+                      "sql/musicas.sqlite3 (tabela music_tracks) e troque para CONFIRMADO")
+        except sqlite3.Error as exc:
+            print(f"Não foi possível contar as faixas para conferir: {exc}")
         estado.close()
     return 0

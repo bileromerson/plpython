@@ -18,16 +18,14 @@ NOME = "download"
 APELIDOS = ("baixar",)
 RESUMO = "baixa os CSVs e gera as M3Us"
 OPCOES = ("CSV...  -c/--csvfile  -s  -p  -u/--url-column  -a/--append  -P/--progress  -v/-vv/-vvv\n"
-          "-w/--wait-on-limit  -r/--retry  -i/--ask  -x/--skip  -nr/--no-review  -nh/--no-hybrid  --review\n"
+          "-w/--wait-on-limit  -r/--retry  -i/--ask  -x/--skip\n"
           "-b/--cookies-from-browser  -k/--cookies  --sleep  --no-artist-links")
 EXEMPLOS = """\
-  plpython.py download -c ./csvs                      # identifica pelo YouTube Music: artista, álbum e capa
+  plpython.py download -c ./csvs                      # baixa; artista CONFIRMADO ou NAO_CONFIRMADO no SQL
   plpython.py download -c ./csvs/Alone.csv            # só uma playlist
   plpython.py download csvs/Alone.csv csvs/Rain.csv --append
   plpython.py download -c ./csvs -s Musicas -p ./m3u
-  plpython.py download -c ./csvs --ask                # no fim, pergunta o que tiver sinal de erro
-  plpython.py download -c ./csvs --review all         # confere também o que não está no YouTube Music
-  plpython.py download -c ./csvs --no-hybrid          # sem identificar: título e canal do vídeo
+  plpython.py download -c ./csvs --ask                # no fim, pergunta o artista das NAO_CONFIRMADO
   plpython.py download -c ./csvs --wait-on-limit --sleep 10-20   # playlist grande, sem pressa
   plpython.py download -c ./csvs --cookies-from-browser firefox  # com a sua conta do Google
   plpython.py download -c ./csvs/Alone.csv -v         # mostra cada passo (-vv: tudo)
@@ -75,21 +73,12 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
     p.add_argument("-l", "--log-file", dest="log_file", metavar="ARQ",
                    help="arquivo de log de erros (padrão: ./Logs.txt)")
 
-    h = p.add_argument_group("identificação pelo YouTube Music (ligada por padrão)")
-    h.add_argument("-nh", "--no-hybrid", dest="modelo_hibrido", action="store_false", default=True,
-                   help="desliga a identificação: usa o título e o canal do vídeo, sem YouTube Music, "
-                        "capa do álbum nem lista de conferência (mais rápido)")
-    h.add_argument("--review", dest="revisar", choices=["errors", "all", "none", "diff"], default="errors",
-                   help="o que vai para conferência (OBSERVAR): errors = só faixas com sinal forte de erro "
-                        "(padrão); all = também as que não estão no YouTube Music (deduzidas do título/canal); "
-                        "none = nada")
+    h = p.add_argument_group("conferência")
     h.add_argument("-i", "--ask", dest="perguntar", action="store_true",
-                   help="no fim, pergunta os campos com sinal de erro das faixas desta execução; "
-                        "é o mesmo que rodar review --answer só nelas")
+                   help="no fim, pergunta o artista/título das faixas desta execução que ficaram "
+                        "NAO_CONFIRMADO; é o mesmo que rodar review --answer só nelas")
     h.add_argument("-x", "--skip", dest="ignorar", nargs="+", action="extend", default=[], metavar="CAMPO",
                    help="com --ask: não pergunta estes campos (title, artists, album, isrc)")
-    h.add_argument("-nr", "--no-review", dest="revisar", action="store_const", const="none",
-                   help="atalho para --review none: segue direto sem lista de conferência")
 
     opcoes_verbose(p)
     opcoes_conta(p)
@@ -99,10 +88,10 @@ def adicionar_opcoes(p: argparse.ArgumentParser, *, update: bool) -> None:
 
 
 def criar_parser(prog: str = "plpython.py download") -> argparse.ArgumentParser:
-    p = novo_parser(prog, "Baixa o áudio dos vídeos dos CSVs, identifica artista/álbum/capa e gera "
-                          "uma M3U por CSV. O MP3 fica na pasta do artista principal; os demais "
-                          "artistas recebem um atalho. O que não der para confirmar vai para "
-                          "conferência (plpython.py review).", EXEMPLOS)
+    p = novo_parser(prog, "Baixa o áudio dos vídeos dos CSVs e gera uma M3U por CSV. O artista é "
+                          "procurado no banco de artistas e no YouTube Music: achou = CONFIRMADO; "
+                          "não achou = NAO_CONFIRMADO (baixa do mesmo jeito, na pasta do palpite). "
+                          "Confira as NAO_CONFIRMADO em sql/musicas.sqlite3.", EXEMPLOS)
     adicionar_opcoes(p, update=False)
     return traduzir_ajuda(p)
 
@@ -120,8 +109,6 @@ def executar(args: argparse.Namespace, *, update: bool = False) -> int:
         args.base_dir = os.path.dirname(os.path.abspath(args.base_dir))
     if update:
         args.reprocess = True
-    if args.revisar not in ("errors", "diff") and not args.modelo_hibrido:
-        print("Aviso: --no-hybrid ignora --review.")
     args.state_file = args.downloads_db
     args.cookies_ytdlp = cookies_ytdlp(args)
     return pltube.executar(args)

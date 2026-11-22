@@ -258,28 +258,18 @@ def remover(conexao: sqlite3.Connection, nome: str) -> str:
     return "artista removido (com as variações)"
 
 
-# Só entra no banco artista que veio de fonte confiável ou de correção sua: um artista
-# deduzido do título que estava errado não pode virar "conhecido".
-FONTES_CONFIAVEIS = {
-    "youtube_music", "youtube_music_descricao", "youtube_music_clipe", "youtube_creditos",
-    "youtube_music_busca", "manual", "manual_regra", "banco_isrc", "musicbrainz", "youtube_validado_musicbrainz",
-}
-
-
 def importar_biblioteca(conexao: sqlite3.Connection) -> int:
-    """Traz os artistas das faixas confirmadas (RESOLVIDO, de fonte confiável) do banco de músicas."""
+    """Traz os artistas das faixas CONFIRMADO do banco de músicas."""
     if not _tem_tabela(conexao, "music", "music_tracks"):
         return 0
     from collections import Counter
 
     antes = conexao.execute(f"SELECT COUNT(*) FROM {ESQUEMA}.artistas").fetchone()[0]
     grafias: Counter[str] = Counter()
-    for artistas_json, provenance_json in conexao.execute(
-        "SELECT artists_json, provenance_json FROM music.music_tracks WHERE metadata_status = 'RESOLVIDO'"
+    for (artistas_json,) in conexao.execute(
+        "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'CONFIRMADO'"
     ).fetchall():
         try:
-            if (json.loads(provenance_json or "{}") or {}).get("artists") not in FONTES_CONFIAVEIS:
-                continue
             grafias.update(str(n).strip() for n in json.loads(artistas_json or "[]") if str(n).strip())
         except (TypeError, ValueError, AttributeError):
             continue

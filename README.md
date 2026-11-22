@@ -1,6 +1,6 @@
 # plpython
 
-Baixa músicas de playlists do YouTube em MP3, identifica artista, álbum e capa pelo YouTube Music, organiza tudo em pastas por artista e gera playlists M3U. Só vai para a conferência o que tiver sinal forte de erro.
+Baixa músicas de playlists do YouTube em MP3, procura o artista no banco de artistas e no YouTube Music, organiza tudo em pastas por artista e gera playlists M3U. O que não der para confirmar fica `NAO_CONFIRMADO` no SQL para você conferir.
 
 ## Instalação
 
@@ -17,9 +17,8 @@ python plpython.py                                  # mostra os comandos
 python plpython.py help download                    # todas as opções de um comando
 
 python plpython.py download -c csvs -P              # baixa todos os CSVs da pasta csvs/, com barra de progresso
-python plpython.py review --answer                  # corrige o que teve sinal de erro
+python plpython.py review --answer                  # corrige as NAO_CONFIRMADO uma por uma
 python plpython.py update -c csvs                   # depois: tenta de novo falhas e pendências
-python plpython.py check -y                         # procura erros nas faixas que já estão no banco
 ```
 
 O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é executado.
@@ -29,20 +28,18 @@ O comando vem sempre primeiro, depois as opções dele. Sem um comando, nada é 
 | Atalho | Parâmetro | Comandos |
 |---|---|---|
 | `-c` | `--csvfile` | download, update, playlist, sync |
-| `-s` / `-p` | `--songs-dir` / `--playlist-dir` | download, update, review, check, artists, sync |
+| `-s` / `-p` | `--songs-dir` / `--playlist-dir` | download, update, review, artists, sync |
 | `-P` | `--progress` | download, update |
 | `-v` / `-vv` / `-vvv` | `--verbose` | todos |
 | `-w` | `--wait-on-limit` | download, update |
 | `-r` | `--retry` | download |
-| `-nr` | `--no-review` | download, update |
-| `-nh` | `--no-hybrid` | download, update |
 | `-b` / `-k` | `--cookies-from-browser` / `--cookies` | download, update, playlist |
 | `-a` | `--answer` (review) / `--append` (download, update) | |
-| `-y` | `--default-ok` (review) / `--apply` (check, artists fix, sync) | |
+| `-y` | `--default-ok` (review) / `--apply` (artists fix, sync) | |
 | `-A` | `--all-fields` | review |
 | `-x` | `--skip` | review, download, update (com `--ask`) |
 | `-i` | `--ask` | download, update |
-| `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review (`-q` também no check) |
+| `-q` / `-d` / `-e` | `--search` / `--details` / `--export` | review |
 | `-n` | `--name` | playlist |
 | `-o` / `-L` | `--output` / `--liked` | spotify |
 | `-m` | `--missing` | sync |
@@ -52,9 +49,8 @@ Atalhos de uma letra podem ser juntados: `-Pvv` é o mesmo que `-P -v -v`, e `re
 
 ```bash
 python plpython.py download -c csvs -Pw -b firefox     # progresso, espera bloqueio, conta do Google
-python plpython.py update -c csvs -P -nr               # atualiza sem lista de conferência
+python plpython.py update -c csvs -P                  # atualiza com barra de progresso
 python plpython.py review -ay                          # responde, aceitando o que ficar em branco
-python plpython.py check -y -q snuffles                # procura erros só nas faixas do snuffles
 ```
 
 ## Pastas
@@ -65,7 +61,6 @@ Os arquivos são criados **na pasta de onde você roda o comando**, não na past
 pasta onde você rodou/
 ├── csvs/                    ← só lida (é o que -c/--csvfile indica)
 ├── songs/<artista>/…mp3     ← MP3 no artista principal; atalhos nos secundários (-s muda o nome)
-├── songs/_observar/         ← atalhos das faixas para conferir
 ├── playlists/*.m3u          ← uma por CSV ou por playlist do Spotify (-p muda)
 ├── sql/                     ← downloads.sqlite3 (progresso), musicas.sqlite3 (metadados),
 │                              artistas.sqlite3 (nomes e variações) e m3u_backup/
@@ -80,9 +75,8 @@ pasta onde você rodou/
 |---|---|
 | `playlist` | cria/atualiza CSVs a partir de playlists do YouTube (URL, suas playlists, curtidas, assistir mais tarde) |
 | `download` | baixa os CSVs, identifica as músicas e gera as M3Us; retoma de onde parou |
-| `update` | relê os CSVs, refaz falhas e reavalia `PENDENTE`/`OBSERVAR` sem baixar de novo o que já existe |
+| `update` | relê os CSVs, refaz falhas, identifica de novo as `NAO_CONFIRMADO` e aplica o que você confirmou no SQL, sem baixar de novo o que já existe |
 | `review` | mostra e confirma no terminal as faixas guardadas no SQL; `--answer` corrige uma por uma |
-| `check` | procura no banco as faixas com sinal forte de erro e tira da conferência as que não têm (simula sem `-y`) |
 | `spotify` | lê suas playlists do Spotify e salva as músicas em `spotify.csv` (não baixa nada) |
 | `sync` | compara o `spotify.csv` com o que já foi baixado, acerta as M3Us e lista o que falta (simula sem `-y`) |
 | `artists` | banco de artistas: nome certo, variações e correção das músicas com o nome errado (simula sem `-y`) |
@@ -97,12 +91,10 @@ python plpython.py download -c csvs                       # todos os CSVs da pas
 python plpython.py download -c csvs/Alone.csv             # um CSV
 python plpython.py download a.csv b.csv --append          # vários, acrescentando às M3Us
 python plpython.py download -c csvs -s Musicas -p m3u     # outras pastas de saída
-python plpython.py download -c csvs --review all          # confere também o que não está no YouTube Music
-python plpython.py download -c csvs --no-hybrid           # rápido: só o título e o canal do vídeo
 python plpython.py download -c csvs --wait-on-limit --sleep 10-20
 python plpython.py download -c meu.csv -u -1              # URL na última coluna do CSV
 python plpython.py update -c csvs -v
-python plpython.py download -c csvs --ask                 # no fim, pergunta o que teve sinal de erro
+python plpython.py download -c csvs --ask                 # no fim, pergunta o artista das NAO_CONFIRMADO
 python plpython.py download -c csvs -i -x album           # idem, sem perguntar o álbum
 
 # conferência
@@ -110,8 +102,6 @@ python plpython.py review -d
 python plpython.py review --answer
 python plpython.py review --ok UG1HUOyL9IA
 python plpython.py review --export conferir.csv
-python plpython.py check                                  # sinais de erro nas faixas já no banco
-python plpython.py check -y                               # grava: com sinal → conferir; sem sinal → sai
 
 # Spotify
 python plpython.py spotify -L                             # suas playlists + curtidas → spotify.csv
@@ -166,68 +156,47 @@ O `download`, o `update` e o `review` regravam as M3Us a partir dos CSVs do YouT
 
 ## Como a música é identificada
 
-A ideia é **confiar em quem publica a música** e só desconfiar quando houver um sinal forte de erro, em vez de tentar confirmar cada artista em vários lugares. O YouTube Music é consultado pela biblioteca `ytmusicapi` (sem login); sem ela instalada, ficam os dados do próprio vídeo. Para não identificar nada (só o título e o canal), use `--no-hybrid`.
+É simples: a música é **sempre baixada**, e o programa só verifica se o artista é mesmo um artista.
 
-**1. De onde vêm o artista e o título** (para na primeira fonte que responder):
+1. Se o **YouTube/YouTube Music** já diz quem é o artista, vale isso: faixa de áudio oficial (canal "- Topic"), clipe oficial, descrição **"Provided to YouTube by …"** ou créditos **"Música neste vídeo"**. Dessas fontes vêm também álbum, ano, número da faixa e capa quadrada.
+2. Senão, o programa junta os **nomes possíveis**: um artista do banco que aparece no título, os dois lados de `Artista - Música` (e o contrário, `Música - Artista`) e o canal.
+3. Cada nome possível é procurado **no banco de artistas** (`sql/artistas.sqlite3`) e, se não estiver lá, **na web** (página de artista no YouTube Music).
+4. **Achou → `CONFIRMADO`**: o MP3 vai para a pasta do artista, e o artista entra no banco de artistas.
+   **Não achou → `NAO_CONFIRMADO`**: o MP3 é baixado do mesmo jeito, na pasta do palpite mais provável (`Artista - Música` → Artista; sem isso, o canal). O artista **não** entra no banco de artistas até você confirmar.
 
-| Ordem | Fonte | Exemplo |
-|---|---|---|
-| 0 | o mesmo **ISRC** de uma faixa já confirmada no seu banco: é a mesma gravação | — |
-| 1 | o **próprio vídeo no YouTube Music**: faixa de áudio oficial (canal "- Topic") ou clipe oficial; do clipe, usa a faixa de áudio que o YouTube Music liga a ele | `Believer` → Imagine Dragons, álbum Evolve, faixa 3/11, capa |
-| 2 | a descrição **"Provided to YouTube by …"** | título, artistas, álbum, data, distribuidora |
-| 3 | os **créditos de música do YouTube** ("Música neste vídeo"), que valem até para re-uploads | `Heat Waves (slowed + reverb)` → Glass Animals |
-| 4 | uma **busca de músicas no YouTube Music** com o título do vídeo | `Believer - Imagine Dragons (Lyrics)` num canal de letras → Imagine Dragons — Believer, com álbum e capa |
-| 5 | o **título e o canal** do vídeo, como nas primeiras versões | `too late - snuffles` → snuffles — too late |
-
-Na busca (4), um resultado só vale se o nome da música está no título do vídeo, a **versão bate** ("Heat Waves" não serve para um vídeo "slowed + reverb"; remix, ao vivo, instrumental, nightcore e sped up também contam) e o artista aparece no título ou no canal. Se o vídeo só tem o nome da música ("Thunderstruck"), vale o resultado com a **mesma duração** (diferença de até 3 s).
-
-Com as fontes 1 a 4 vêm também **álbum, ano, número da faixa e capa quadrada** (544×544). Sem capa de álbum, a thumbnail do vídeo é recortada para ficar quadrada. **Álbum ou capa que faltam não mandam a faixa para a conferência.**
-
-**2. Lendo o título do vídeo** (fonte 5). O título é limpo: saem "(Official Video)", "[Lyrics]", "[Monstercat Release]", "| Lyric Video", emojis, "#hashtags" do fim e "02. " do começo; "ft./feat./(with …)" viram artistas; versões ("slowed", "sped up", "remix"…) ficam no título final. Depois:
-
-- `"Música" by Artista` → a música é o que está entre aspas;
-- o título é lido em **blocos** separados por `|` ou `//`; o bloco principal é o primeiro que não é trilha/obra ("OST", "Soundtrack", "série"…) nem o próprio canal;
-- dentro do bloco, cada pedaço (`-`, `–`, `:`, `·`, aspas) é comparado com o **canal** e com os artistas que você já tem (banco de músicas e banco de artistas): o pedaço que bate é o artista, e a música é o pedaço mais próximo;
-- `Álbum - 02. Música` num canal → o artista é o canal e o álbum é a primeira parte;
-- sem nada disso, vale `Artista - Música`; com um pedaço só, o artista é o canal.
-
-| Título | Resultado |
+| Título do vídeo (canal) | Resultado |
 |---|---|
-| Liberdade Provisória - Henrique e Juliano - com cifras | Henrique & Juliano — Liberdade Provisória (banco) |
-| ACDC Thunderstruck ( official video ) | AC/DC — Thunderstruck (banco) |
-| Cult of the Lamb Song - "Fool's Gold" by ivycomb | ivycomb — Fool's Gold |
-| Final Space Official Soundtrack \| When the Night is Long (feat. Shelby Merry) \| WaterTower | WaterTower, Shelby Merry — When the Night is Long |
-| INSTINCT - 02. Instinct (canal NIIC) | NIIC — Instinct, álbum INSTINCT |
-| My Ordinary Life-The Living Tombstone | The Living Tombstone — My Ordinary Life |
+| `Believer` (vídeo oficial) | `CONFIRMADO` Imagine Dragons — Believer, álbum Evolve (YouTube Music) |
+| `snuffles - Keep on With It` (Chill Nation) | `CONFIRMADO` snuffles — Keep on With It (banco de artistas) |
+| `ImagineDragons - Believer (Official Video)` | `CONFIRMADO` Imagine Dragons — Believer (artista achado no YouTube Music) |
+| `Fulano - Música Legal` (Canal Qualquer) | `NAO_CONFIRMADO` Fulano — Música Legal (palpite: título) |
+| `Só o nome` (Chill Nation) | `NAO_CONFIRMADO` Chill Nation — Só o nome (palpite: canal) |
 
-**Vários artistas.** A mesma regra vale no título, nos dados do YouTube e no que você digita no `review`: **vírgula, ` & `, ` / `, ` x `, `|`, `;` e `feat.`** separam (o `&`, o `/` e o `x` só com espaço dos dois lados: `AC/DC` e `Simon&Garfunkel` ficam juntos). Nomes **conhecidos** ficam inteiros, com a grafia oficial: os do banco de artistas e de faixas confirmadas, e uma lista embutida (Earth, Wind & Fire, Tyler, The Creator, Jorge & Mateus, Henrique & Juliano…). Para uma dupla nova não ser separada: `plpython.py artists add "Fulano & Ciclano"`. `"aspas"` também mantêm um nome junto. No YouTube Music, cada artista com página já vem separado.
+Canal de re-upload/curadoria ("Lyrics", "Records", "Music"…) só vale como artista se já estiver no banco de artistas. O título é limpo ("(Official Video)", "[Lyrics]", emojis, "#hashtags"); "ft./feat./(with …)" viram artistas; versões ("slowed", "sped up", "remix"…) ficam no título.
 
-**3. Sinais de erro** (só isso manda a faixa para a conferência, `OBSERVAR`). Os dados do catálogo do YouTube Music (gravadora/distribuidora) não são questionados; os deduzidos do título/canal são:
+**Vários artistas.** **Vírgula, ` & `, ` / `, ` x `, `|`, `;` e `feat.`** separam (o `&`, o `/` e o `x` só com espaço dos dois lados: `AC/DC` e `Simon&Garfunkel` ficam juntos). Nomes do banco de artistas e uma lista embutida (Earth, Wind & Fire, Tyler, The Creator…) ficam inteiros. Para uma dupla nova não ser separada: `plpython.py artists add "Fulano & Ciclano"`.
 
-| Sinal | Exemplos reais |
-|---|---|
-| **artista com cara de pedaço do título**: parênteses, colchetes, `-`, `#`, `@`, número de faixa, "lyrics", "remix", "soundtrack", nome longo demais | `The Living Tombstone (FNAF2)`, `[Dubstep]`, `2. I MONSTER`, `Astronaut In The Ocean (Alok Remix)` |
-| **artista que é canal de re-upload, selo ou trilha** | `Lyrics Hub`, `… OST`, canal já conhecido como re-upload |
-| **título com sobras do vídeo**: "lyrics", "official video", "#hashtags", `[… Release]`, aspas, ` by `, ` - `, número de faixa | `02. Instinct`, `Dreams [Monstercat Release]`, `RET TRO - Happy (prod. ivycomb)` |
-| **título contém o nome do artista** | `Glyde // Latte` com artista Glyde |
-| **título e artista trocados**: o título é um artista que você tem em mais faixas que o "artista" desta | `Bad Habits — Ed Sheeran` |
-| **artista incerto**: o título tem três partes ou mais, ou o canal aparece num bloco à parte (selo publicando `Música - Artista`) | `Wonka 2023 - Pure Imagination - Timothée Chalamet` |
-| **vídeo longo** (mais de 15 min) fora do catálogo: compilação, álbum inteiro ou loop | `Lofi beats 24/7` |
+**Pastas.** O MP3 fica na pasta do **artista principal**, e cada artista secundário recebe um **atalho** para o mesmo arquivo (`--no-artist-links` desliga os atalhos).
 
-Sem artista nenhum, a faixa fica `PENDENTE`. Correções suas (`review`) nunca são questionadas.
+### Conferir no SQL
 
-| Opção | O que vai para a conferência |
-|---|---|
-| *(padrão)* `--review errors` | só as faixas com sinal de erro |
-| `--review all` | também as que não estão no YouTube Music (deduzidas do título/canal) |
-| `--no-review` | nada (os sinais ficam anotados no banco) |
-| `--no-hybrid` | não identifica: título e canal do vídeo, sem YouTube Music |
+Abra `sql/musicas.sqlite3` (no DB Browser for SQLite, por exemplo, ou com `sqlite3`):
 
-**4. Pastas.** O MP3 fica na pasta do **artista principal**, e cada artista secundário recebe um **atalho** para o mesmo arquivo, sem duplicar o áudio (`--no-artist-links` desliga os atalhos). Se um download antigo estiver na pasta errada, ele é movido para a pasta certa, sem sobrescrever nada.
+```sql
+-- o que falta conferir
+SELECT video_id, artists_json, title, review_note FROM music_tracks WHERE metadata_status = 'NAO_CONFIRMADO';
 
-**5. Memória.** Toda faixa confirmada por uma fonte confiável ou por você ensina se o canal é do artista ou um re-upload (pela maioria dos votos) e coloca o artista no banco de artistas. Artistas só deduzidos do título não entram, para um erro não virar "conhecido". No `update`, as faixas da lista são identificadas de novo pelo YouTube Music, com os dados do vídeo guardados no banco (sem baixar o áudio).
+-- está certo: confirme
+UPDATE music_tracks SET metadata_status = 'CONFIRMADO' WHERE video_id = 'UG1HUOyL9IA';
 
-**Faixas que já estão no banco:** rode `plpython.py update -c csvs` (identifica de novo as da lista pelo YouTube Music) e depois `plpython.py check -y`, que passa os mesmos sinais de erro em todas as faixas: as que estavam na lista só por álbum/capa faltando saem, e as já resolvidas com sinal de erro entram.
+-- está errado: corrija e confirme
+UPDATE music_tracks SET artists_json = '["Artista Certo"]', title = 'Música', metadata_status = 'CONFIRMADO'
+ WHERE video_id = 'UG1HUOyL9IA';
+```
+
+Na próxima execução (`download` ou `update`), o que você confirmou vale: os artistas entram no banco de artistas, e o `update -c csvs` move o MP3 para a pasta certa e regrava as tags. Também dá para conferir pelo terminal com `plpython.py review` (veja abaixo).
+
+Os status antigos (`RESOLVIDO`, `OBSERVAR`, `PENDENTE`) são convertidos sozinhos na primeira execução: `RESOLVIDO` → `CONFIRMADO`; os outros → `NAO_CONFIRMADO`.
 
 ## Banco de artistas: `artists`
 
@@ -317,25 +286,18 @@ O que está errado:
 No terminal, sem precisar de programa de SQL:
 
 ```bash
-python plpython.py review                       # faixas OBSERVAR/PENDENTE com o motivo
+python plpython.py review                       # faixas NAO_CONFIRMADO com o motivo
 python plpython.py review -d                    # + álbum, ISRC, arquivo e link do YouTube
 python plpython.py review --status all --search snuffles
 python plpython.py review --ok UG1HUOyL9IA      # está certo: marca como conferida
-python plpython.py review --ok-all              # confirma todas as OBSERVAR
+python plpython.py review --ok-all              # confirma todas as NAO_CONFIRMADO
 python plpython.py review --export conferir.csv # abre no Excel/LibreOffice
 python plpython.py review --sql "SELECT title, album FROM music_tracks"   # SQL somente leitura
 ```
 
 Rode na mesma pasta onde rodou o download, porque ele lê `./sql/`. Para corrigir título ou artista, use `review --answer`.
 
-Outros lugares para conferir: a pasta `_observar/` com atalhos para os MP3s, ou direto no SQL:
-
-```sql
--- sqlite3 sql/musicas.sqlite3
-SELECT title, artists_json, review_note FROM music_tracks WHERE metadata_status = 'OBSERVAR';
-```
-
-`update` identifica de novo as faixas `PENDENTE` e `OBSERVAR` que você ainda não revisou, e `check -y` passa os sinais de erro nas que já estão resolvidas.
+Ou direto no SQL: veja [Conferir no SQL](#conferir-no-sql).
 
 ## Sua conta do Google: playlists privadas, curtidas e vídeos restritos
 
@@ -390,21 +352,20 @@ Funciona em todos os comandos. Sem `-v`, a saída é a de sempre.
 
 | Nível | Mostra |
 |---|---|
-| `-v` | erros que normalmente só iam para o `Logs.txt`; consultas ao SQL (encontrado/novo, canal já conhecido, o que foi aprendido); leitura e download no YouTube (inclusive quando reaproveita os metadados); pausas; **de onde veio o artista** (YouTube Music, créditos, título/canal) e os **sinais de erro**; capa; atalhos criados |
-| `-vv` | tudo do `-v` e mais: tempo decorrido; o que cada busca no YouTube Music devolveu; os metadados lidos do YouTube campo a campo; cada tag gravada no MP3; avisos do yt-dlp |
+| `-v` | erros que normalmente só iam para o `Logs.txt`; consultas ao SQL (encontrado/novo, canal já conhecido, o que foi aprendido); leitura e download no YouTube (inclusive quando reaproveita os metadados); pausas; **de onde veio o artista** (YouTube Music, banco de artistas, título/canal); capa; atalhos criados |
+| `-vv` | tudo do `-v` e mais: tempo decorrido; os nomes possíveis do artista; os metadados lidos do YouTube campo a campo; cada tag gravada no MP3; avisos do yt-dlp |
 | `-vvv` | tudo do `-vv` e mais a depuração do próprio yt-dlp |
 
-No terminal, a saída é colorida. Cada área tem uma cor, "bate" e `RESOLVIDO` aparecem em verde, "não bate" e `OBSERVAR` em amarelo, e erros e `PENDENTE` em vermelho. Se a saída for redirecionada para um arquivo, ela sai sem cor. `NO_COLOR=1` desliga as cores.
+No terminal, a saída é colorida. Cada área tem uma cor, "bate" e `CONFIRMADO` aparecem em verde, "não bate" e `NAO_CONFIRMADO` em amarelo, e erros em vermelho. Se a saída for redirecionada para um arquivo, ela sai sem cor. `NO_COLOR=1` desliga as cores.
 
 Exemplo de `-v`:
 
 ```
-[Identificação] RESOLVIDO: Imagine Dragons — Believer | álbum Evolve (catálogo do YouTube Music)
+[Identificação] CONFIRMADO: Imagine Dragons — Believer | álbum Evolve (faixa oficial no YouTube Music)
 [Capa] baixando a capa do álbum: https://lh3.googleusercontent.com/…=w544-h544-l90-rj
-[SQL] aprendido: canal 'Lyrics Hub' é re-upload/curadoria
-[Identificação] OBSERVAR: Chill Vibes Records — Lofi beats to study (nome do canal)
-[Identificação]   conferir: artista parece canal de re-upload, selo ou trilha: 'Chill Vibes Records'
-[Identificação]   conferir: vídeo longo (60 min): pode ser compilação, álbum inteiro ou loop
+[Identificação] 'snuffles' está no banco de artistas
+[Identificação] CONFIRMADO: snuffles — Keep on With It (banco de artistas)
+[Identificação] NAO_CONFIRMADO: Chill Vibes Records — Lofi beats to study (nome do canal)
 ```
 
 ## Estrutura do código
@@ -412,10 +373,10 @@ Exemplo de `-v`:
 ```
 plpython.py              ← único ponto de entrada: mostra o menu e encaminha cada comando
 comandos/                ← um arquivo por comando: opções, ajuda e exemplos
-├── playlist.py  download.py  update.py  review.py  check.py  artists.py  spotify.py  sync.py
+├── playlist.py  download.py  update.py  review.py  artists.py  spotify.py  sync.py
 └── _comum.py            ← opções compartilhadas (pastas, bancos, conta, -v)
 pltube.py                ← motor do download: YouTube, pastas, M3U, SQL, tags e capa
-identificar_musica.py    ← identificação pelo YouTube Music e os sinais de erro
+identificar_musica.py    ← identificação: fonte oficial, nomes possíveis, banco de artistas e web
 textos.py                ← regras de nomes e títulos (vários artistas, pedaços do título)
 banco_artistas.py        ← banco de artistas (nome certo e variações)
 aplicar_metadados.py     ← grava uma correção: tags, banco, pasta e M3U

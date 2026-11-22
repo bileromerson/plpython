@@ -9,4 +9,4 @@ Cada módulo define:
 Para adicionar um comando novo, crie o arquivo aqui e coloque o nome em ORDEM.
 """
 
-ORDEM = ("playlist", "download", "update", "review", "check", "artists", "spotify", "sync")
+ORDEM = ("playlist", "download", "update", "review", "artists", "spotify", "sync")

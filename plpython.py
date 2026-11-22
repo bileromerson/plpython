@@ -7,7 +7,6 @@ e encaminha cada um para o seu próprio arquivo na pasta `comandos/`:
   plpython.py download ...  ->  comandos/download.py
   plpython.py update ...    ->  comandos/update.py
   plpython.py review ...    ->  comandos/review.py
-  plpython.py check ...     ->  comandos/check.py
   plpython.py artists ...   ->  comandos/artists.py
   plpython.py spotify ...   ->  comandos/spotify.py
   plpython.py sync ...      ->  comandos/sync.py
@@ -64,7 +63,6 @@ def mostrar_menu(arquivo=None) -> None:
         "exemplos:",
         "  python plpython.py download -c ./csvs -P",
         "  python plpython.py update -c ./csvs --wait-on-limit",
-        "  python plpython.py check -y",
         "  python plpython.py review --answer",
         "  python plpython.py spotify && python plpython.py sync -y",
         "",
@@ -87,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         # Toda ação exige um comando antes das opções: nada roda por engano.
         print(f"Comando ausente ou desconhecido: {argv[0]!r}\n", file=sys.stderr)
         print("Escreva o comando primeiro e depois as opções dele, por exemplo:", file=sys.stderr)
-        print("  python plpython.py download -c csvs --hybrid\n", file=sys.stderr)
+        print("  python plpython.py download -c csvs\n", file=sys.stderr)
         mostrar_menu(sys.stderr)
         return 2
 

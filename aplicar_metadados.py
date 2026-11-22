@@ -1,6 +1,6 @@
 """Grava uma correção de metadados numa faixa: tags do MP3, banco, pasta do artista e M3U.
 
-Usado pelo `review --answer`, pelo `review --apply`, pelo `check -y` e pelo `artists fix`.
+Usado pelo `review --answer`, pelo `review --apply` e pelo `artists fix`.
 Uma correção é descrita como um registro com campos "usar_*"/"*_final" (título, artistas,
 álbum, ISRC) e "confirmar_manual"; `_montar_plano` monta o resultado novo e
 `_aplicar_plano` grava tudo, voltando o MP3 ao original se algo falhar.
@@ -129,11 +129,11 @@ def _montar_plano(
     }
 
     if confirmar:
-        resultado["status"] = "RESOLVIDO"
+        resultado["status"] = pltube.CONFIRMADO
         resultado["pending_reasons"] = []
         resultado["observations"] = []
     else:
-        resultado["status"] = "OBSERVAR" if resultado.get("status") == "OBSERVAR" else "PENDENTE"
+        resultado["status"] = pltube.NAO_CONFIRMADO
         razoes = list(resultado.get("pending_reasons") or [])
         razao_parcial = "revisão parcial; confirme manualmente após revisar os campos restantes"
         if razao_parcial not in razoes:
@@ -217,7 +217,7 @@ def _aplicar_plano(conexao, plano: dict[str, Any], playlist_dir: str) -> None:
             conexao, plano["video_key"], plano["result"]
         )
         # Correção manual também ensina se o canal é do artista ou um re-upload.
-        pltube.aprender_canal(conexao, plano["video_key"], plano["result"])
+        pltube.aprender_artistas(conexao, plano["result"], "manual")
         pltube.aprender_artistas(conexao, plano["result"], "review")
         conexao.commit()
     except Exception:
@@ -241,9 +241,7 @@ def _reorganizar_arquivo(conexao, plano: dict[str, Any]) -> None:
     caminho = plano["audio_path"]
     if not artistas or not os.path.isfile(caminho):
         return
-    novo = caminho
-    if resultado.get("status") != "PENDENTE":
-        novo = pltube.mover_para_artista_principal(caminho, artistas)
+    novo = pltube.mover_para_artista_principal(caminho, artistas)
     if novo != caminho:
         relativo = pltube._caminho_relativo_banco(novo, conexao)
         conexao.execute("UPDATE music.metadata_resolution SET audio_path = ? WHERE video_key = ?",
@@ -254,5 +252,5 @@ def _reorganizar_arquivo(conexao, plano: dict[str, Any]) -> None:
         plano["audio_path"] = novo
     for artista in artistas[1:]:
         pltube.criar_link_artista(novo, artista)
-    if resultado.get("status") == "RESOLVIDO":
+    if resultado.get("status") == pltube.CONFIRMADO:
         pltube.limpar_atalhos_conferencia(novo)

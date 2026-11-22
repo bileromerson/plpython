@@ -49,9 +49,8 @@ _CORES_AREA = {
 _DESTAQUES = (
     (re.compile(r"→ bate[^;]*"), "32"),                        # YouTube = banco
     (re.compile(r"≠|→ não bate"), "33"),                       # divergência
-    (re.compile(r"\bRESOLVIDO\b"), "1;32"),
-    (re.compile(r"\bOBSERVAR\b"), "1;33"),
-    (re.compile(r"\bPENDENTE\b"), "1;31"),
+    (re.compile(r"\bNAO_CONFIRMADO\b"), "1;33"),
+    (re.compile(r"(?<!NAO_)\bCONFIRMADO\b"), "1;32"),
     (re.compile(r"\bmotivo:"), "33"),
 )
 _ANSI_WINDOWS: bool | None = None

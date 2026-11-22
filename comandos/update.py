@@ -18,7 +18,7 @@ OPCOES = "as mesmas do download, exceto --retry"
 EXEMPLOS = """\
   plpython.py update -c ./csvs
   plpython.py update -c ./csvs --wait-on-limit
-  plpython.py update csvs/Alone.csv --no-review"""
+  plpython.py update csvs/Alone.csv"""
 
 
 def criar_parser(prog: str = "plpython.py update") -> argparse.ArgumentParser:

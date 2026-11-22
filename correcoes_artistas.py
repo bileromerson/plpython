@@ -17,7 +17,7 @@ errado foi corrigido para nomes diferentes em faixas diferentes, nada é propaga
 
 Aplicada a correção, a faixa é identificada de novo com o artista certo (o YouTube
 Music completa álbum e capa). Ela só sai da lista se não sobrar sinal de erro;
-senão continua OBSERVAR, só com o que falta.
+senão continua NAO_CONFIRMADO, só com o que falta.
 """
 
 from __future__ import annotations
@@ -165,7 +165,7 @@ def _reidentificar(conexao: sqlite3.Connection, salvo: dict, regra: Regra) -> di
 def _faltando(resultado: dict) -> list[str]:
     from comandos.review import PERGUNTAVEIS, campos_com_problema
 
-    if resultado.get("status") == "RESOLVIDO":
+    if resultado.get("status") == "CONFIRMADO":
         return []
     return [c for c in campos_com_problema(resultado) if c in PERGUNTAVEIS]
 
@@ -178,7 +178,7 @@ def _plano(conexao: sqlite3.Connection, salvo: dict, linha: sqlite3.Row, regra: 
     marca = {"via": "review --apply", "regra": {"de": regra.de, "para": regra.para}}
     novo = _reidentificar(conexao, salvo, regra)
     if novo is not None:
-        resolvido = novo.get("status") == "RESOLVIDO"
+        resolvido = novo.get("status") == "CONFIRMADO"
         if not resolvido:
             _podar_motivos(novo)
         novo["manual_review"] = {"fields": ["artists"], "confirmed": resolvido, **marca}
@@ -239,7 +239,7 @@ def aplicar(conexao: sqlite3.Connection, args: Any) -> int:
             print(colorir(f"✗ {rotulo}: não foi possível gravar: {exc}", "1;31"))
             continue
         novo = plano["result"]
-        if novo.get("status") == "RESOLVIDO":
+        if novo.get("status") == "CONFIRMADO":
             resolvidas += 1
             print(colorir(f"✓ {_rotulo(novo.get('metadata') or {})}: {correcao} ({motivo}); saiu da lista", "32"))
         else:

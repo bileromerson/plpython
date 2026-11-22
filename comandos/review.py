@@ -22,7 +22,7 @@ RESUMO = "mostra e confirma as faixas do banco SQL direto no terminal"
 OPCOES = ("-a/--answer  --apply  -y/--default-ok  -A/--all-fields  -x/--skip CAMPO  --status\n"
           "-q/--search  -d/--details  --ok ID...  --ok-all  -e/--export  --sql")
 EXEMPLOS = """\
-  plpython.py review                      # faixas para conferir (OBSERVAR/PENDENTE)
+  plpython.py review                      # faixas com artista NAO_CONFIRMADO
   plpython.py review --answer             # responde uma por uma; só sai da lista o que ficar resolvido
   plpython.py review --answer --skip album   # não pergunta o álbum
   plpython.py review --apply              # leva os artistas corrigidos às faixas parecidas
@@ -30,16 +30,14 @@ EXEMPLOS = """\
   plpython.py review -d                   # com álbum, arquivo e link do YouTube
   plpython.py review --status all --search snuffles
   plpython.py review --ok UG1HUOyL9IA njowoGhmw6E
-  plpython.py review --ok-all             # confirma todas as OBSERVAR
+  plpython.py review --ok-all             # confirma todas as NAO_CONFIRMADO
   plpython.py review --export conferir.csv
   plpython.py review --sql "SELECT title, album FROM music_tracks\""""
 
 DESCONHECIDO = "Unknown"
 STATUS_FILTRO = {
-    "open": ("PENDENTE", "OBSERVAR"),
-    "observe": ("OBSERVAR",),
-    "pending": ("PENDENTE",),
-    "resolved": ("RESOLVIDO",),
+    "open": ("NAO_CONFIRMADO",),
+    "confirmed": ("CONFIRMADO",),
     "all": (),
 }
 
@@ -47,13 +45,12 @@ STATUS_FILTRO = {
 def criar_parser(prog: str = "plpython.py review") -> argparse.ArgumentParser:
     p = novo_parser(prog, "Mostra as faixas guardadas em ./sql/ e permite confirmá-las.", EXEMPLOS)
     p.add_argument("--status", choices=list(STATUS_FILTRO), default="open",
-                   help="quais faixas mostrar: open = OBSERVAR + PENDENTE (padrão), observe = OBSERVAR, "
-                        "pending = PENDENTE, resolved = RESOLVIDO, all = todas")
+                   help="quais faixas mostrar: open = NAO_CONFIRMADO (padrão), confirmed = CONFIRMADO, all = todas")
     p.add_argument("-q", "--search", dest="busca", metavar="TEXTO", help="filtra por título, artista, álbum ou ID do vídeo")
     p.add_argument("-d", "--details", dest="detalhes", action="store_true", help="mostra álbum, ISRC, arquivo e link")
     p.add_argument("--ok", nargs="+", metavar="VIDEO_ID",
-                   help="marca as faixas como conferidas (RESOLVIDO), mantendo título/artista atuais")
-    p.add_argument("--ok-all", action="store_true", help="confirma todas as faixas OBSERVAR de uma vez")
+                   help="marca as faixas como CONFIRMADO, mantendo título/artista atuais")
+    p.add_argument("--ok-all", action="store_true", help="confirma todas as faixas NAO_CONFIRMADO de uma vez")
     p.add_argument("-e", "--export", metavar="CSV", help="salva a lista filtrada num CSV para abrir no Excel")
     p.add_argument("--sql", metavar="SELECT", help="executa uma consulta SQL somente leitura")
     r = p.add_argument_group("responder (corrigir uma por uma)")
@@ -154,7 +151,7 @@ def listar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
         "SELECT metadata_status, COUNT(*) FROM music.music_tracks GROUP BY metadata_status"
     ).fetchall()
     print("\nTotal: " + ", ".join(f"{s}={n}" for s, n in contagem))
-    if args.status in ("open", "observe", "pending"):
+    if args.status == "open":
         print("Se estiver certo: plpython.py review --ok VIDEO_ID [VIDEO_ID ...]  (ou --ok-all)")
     return 0
 
@@ -162,7 +159,7 @@ def listar(conexao: sqlite3.Connection, args: argparse.Namespace) -> int:
 def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool) -> int:
     if todos_observar:
         ids = [r[0] for r in conexao.execute(
-            "SELECT video_id FROM music.metadata_resolution WHERE status = 'OBSERVAR'"
+            "SELECT video_id FROM music.metadata_resolution WHERE status = 'NAO_CONFIRMADO'"
         ).fetchall()]
     erros = 0
     for video_id in ids:
@@ -181,7 +178,7 @@ def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool)
             print(f"{video_id}: sem título/artista; corrija com: plpython.py review --answer")
             erros += 1
             continue
-        resultado["status"] = "RESOLVIDO"
+        resultado["status"] = pltube.CONFIRMADO
         resultado["pending_reasons"] = []
         resultado["observations"] = []
         resultado["manual_review"] = {"fields": [], "confirmed": True, "via": "review --ok"}
@@ -190,7 +187,7 @@ def confirmar(conexao: sqlite3.Connection, ids: list[str], todos_observar: bool)
             (resultado.setdefault("provenance", {}))[campo] = "manual"
             (resultado.setdefault("scores", {}))[campo] = 1.0
         resultado["observations"] = []
-        pltube.aprender_canal(conexao, linha["video_key"], resultado)
+        pltube.aprender_artistas(conexao, resultado, "manual")
         pltube.salvar_resolucao(conexao, linha["video_key"], resultado, salvo.get("audio_path") or "")
         caminho = salvo.get("audio_path") or ""
         if caminho and os.path.isfile(caminho):
@@ -248,7 +245,7 @@ APELIDOS_CAMPOS = {
     "artist": "artists", "artists": "artists", "artista": "artists", "artistas": "artists",
     "album": "album", "álbum": "album", "isrc": "isrc", "cover": "cover", "capa": "cover",
 }
-COR_STATUS = {"RESOLVIDO": "1;32", "OBSERVAR": "1;33", "PENDENTE": "1;31"}
+COR_STATUS = {"CONFIRMADO": "1;32", "NAO_CONFIRMADO": "1;33"}
 
 
 def _cor(texto: str, codigo: str) -> str:
