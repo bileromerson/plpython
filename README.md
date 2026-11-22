@@ -156,21 +156,27 @@ O `download`, o `update` e o `review` regravam as M3Us a partir dos CSVs do YouT
 
 ## Como a música é identificada
 
-É simples: a música é **sempre baixada**, e o programa só verifica se o artista é mesmo um artista.
+A música é **sempre baixada**. O programa só decide quem é o artista, nesta ordem (para no primeiro que responder):
 
-1. Se o **YouTube/YouTube Music** já diz quem é o artista, vale isso: faixa de áudio oficial (canal "- Topic"), clipe oficial, descrição **"Provided to YouTube by …"** ou créditos **"Música neste vídeo"**. Dessas fontes vêm também álbum, ano, número da faixa e capa quadrada.
-2. Senão, o programa junta os **nomes possíveis**: um artista do banco que aparece no título, os dois lados de `Artista - Música` (e o contrário, `Música - Artista`) e o canal.
-3. Cada nome possível é procurado **no banco de artistas** (`sql/artistas.sqlite3`) e, se não estiver lá, **na web** (página de artista no YouTube Music).
-4. **Achou → `CONFIRMADO`**: o MP3 vai para a pasta do artista, e o artista entra no banco de artistas.
-   **Não achou → `NAO_CONFIRMADO`**: o MP3 é baixado do mesmo jeito, na pasta do palpite mais provável (`Artista - Música` → Artista; sem isso, o canal). O artista **não** entra no banco de artistas até você confirmar.
+1. **Código do vídeo:** se o YouTube/YouTube Music já diz quem é o artista, vale isso: descrição **"Provided to YouTube by …"**, créditos **"Música neste vídeo"**, faixa de áudio oficial (canal "- Topic") ou clipe oficial. Dessas fontes vêm também álbum, ano, número da faixa e capa quadrada.
+2. **Pastas e banco de artistas (sem servidor):** o programa separa os **nomes possíveis** (os dois lados de `Artista - Música`, o contrário `Música - Artista`, um artista conhecido dentro do título e o canal) e compara com as **pastas que já existem em `songs/`** e com o **banco de artistas**. Os dois são lidos **uma vez** no começo e ficam na memória, então nada é consultado no servidor nem no SQL a cada música. Bateu → `CONFIRMADO`, e o MP3 vai para a pasta desse artista.
+3. **Música + artista no YouTube Music:** busca o título do vídeo (e, se o canal não está no título, `canal + título`). Só vale o resultado em que **o nome da música e o artista batem com o mesmo palpite**. Assim um nome de música nunca vira artista, mesmo que exista um artista com esse nome.
+4. **YouTube Music × YouTube:** sem artista que bata, compara os resultados com o vídeo: **mesmo nome de música, mesma versão** (slowed, remix, ao vivo…) **e mesma duração** (até 2 s de diferença).
+5. **Nada disso → `NAO_CONFIRMADO`:** o MP3 é baixado do mesmo jeito, na pasta do palpite mais provável (`Artista - Música` → Artista; sem isso, o canal). O artista **não** entra no banco de artistas até você confirmar.
+
+**Pastas que não contam como artista** (para não repetir a confusão antiga de título no lugar do nome):
+- pasta com o nome de uma música que está dentro dela, como `songs/Believer/Believer [id].mp3`;
+- pasta que só tem faixas `NAO_CONFIRMADO` (foi criada por um palpite que ninguém conferiu). Isso sai de **uma** consulta ao SQL no começo da execução.
+
+Com `-v` aparecem quantas pastas contam e quais foram ignoradas. Se `A - B` tem os dois lados conhecidos, fica o lado esquerdo como artista.
 
 | Título do vídeo (canal) | Resultado |
 |---|---|
-| `Believer` (vídeo oficial) | `CONFIRMADO` Imagine Dragons — Believer, álbum Evolve (YouTube Music) |
-| `snuffles - Keep on With It` (Chill Nation) | `CONFIRMADO` snuffles — Keep on With It (banco de artistas) |
-| `ImagineDragons - Believer (Official Video)` | `CONFIRMADO` Imagine Dragons — Believer (artista achado no YouTube Music) |
+| `Believer` (vídeo oficial) | `CONFIRMADO` Imagine Dragons — Believer, álbum Evolve (código do vídeo) |
+| `snuffles - Keep on With It` (Chill Nation), já existe `songs/snuffles/` | `CONFIRMADO` snuffles — Keep on With It (pasta, sem consulta) |
+| `Believer - Imagine Dragons (Lyrics)` (Lyrics Hub) | `CONFIRMADO` Imagine Dragons — Believer (música + artista no YouTube Music) |
+| `Thunderstruck` (Rock Hits Records), 4:52 | `CONFIRMADO` AC/DC — Thunderstruck (mesmo título e duração no YouTube Music) |
 | `Fulano - Música Legal` (Canal Qualquer) | `NAO_CONFIRMADO` Fulano — Música Legal (palpite: título) |
-| `Só o nome` (Chill Nation) | `NAO_CONFIRMADO` Chill Nation — Só o nome (palpite: canal) |
 
 Canal de re-upload/curadoria ("Lyrics", "Records", "Music"…) só vale como artista se já estiver no banco de artistas. O título é limpo ("(Official Video)", "[Lyrics]", emojis, "#hashtags"); "ft./feat./(with …)" viram artistas; versões ("slowed", "sped up", "remix"…) ficam no título.
 
@@ -352,7 +358,7 @@ Funciona em todos os comandos. Sem `-v`, a saída é a de sempre.
 
 | Nível | Mostra |
 |---|---|
-| `-v` | erros que normalmente só iam para o `Logs.txt`; consultas ao SQL (encontrado/novo, canal já conhecido, o que foi aprendido); leitura e download no YouTube (inclusive quando reaproveita os metadados); pausas; **de onde veio o artista** (YouTube Music, banco de artistas, título/canal); capa; atalhos criados |
+| `-v` | erros que normalmente só iam para o `Logs.txt`; consultas ao SQL (encontrado/novo, canal já conhecido, o que foi aprendido); leitura e download no YouTube (inclusive quando reaproveita os metadados); pausas; **de onde veio o artista** (código do vídeo, pasta, banco de artistas, busca no YouTube Music, título/canal); capa; atalhos criados |
 | `-vv` | tudo do `-v` e mais: tempo decorrido; os nomes possíveis do artista; os metadados lidos do YouTube campo a campo; cada tag gravada no MP3; avisos do yt-dlp |
 | `-vvv` | tudo do `-vv` e mais a depuração do próprio yt-dlp |
 
@@ -363,8 +369,8 @@ Exemplo de `-v`:
 ```
 [Identificação] CONFIRMADO: Imagine Dragons — Believer | álbum Evolve (faixa oficial no YouTube Music)
 [Capa] baixando a capa do álbum: https://lh3.googleusercontent.com/…=w544-h544-l90-rj
-[Identificação] 'snuffles' está no banco de artistas
-[Identificação] CONFIRMADO: snuffles — Keep on With It (banco de artistas)
+[Identificação] 'snuffles' já existe (pasta de artista em songs/)
+[Identificação] CONFIRMADO: snuffles — Keep on With It (pasta de artista em songs/)
 [Identificação] NAO_CONFIRMADO: Chill Vibes Records — Lofi beats to study (nome do canal)
 ```
 
@@ -376,7 +382,7 @@ comandos/                ← um arquivo por comando: opções, ajuda e exemplos
 ├── playlist.py  download.py  update.py  review.py  artists.py  spotify.py  sync.py
 └── _comum.py            ← opções compartilhadas (pastas, bancos, conta, -v)
 pltube.py                ← motor do download: YouTube, pastas, M3U, SQL, tags e capa
-identificar_musica.py    ← identificação: fonte oficial, nomes possíveis, banco de artistas e web
+identificar_musica.py    ← identificação: código do vídeo, pastas/banco de artistas, busca no YouTube Music
 textos.py                ← regras de nomes e títulos (vários artistas, pedaços do título)
 banco_artistas.py        ← banco de artistas (nome certo e variações)
 aplicar_metadados.py     ← grava uma correção: tags, banco, pasta e M3U

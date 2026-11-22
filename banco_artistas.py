@@ -128,6 +128,21 @@ def nomes_conhecidos(conexao: sqlite3.Connection | None) -> list[str]:
     return list(dict.fromkeys(nomes))
 
 
+def mapa(conexao: sqlite3.Connection | None) -> dict[str, str]:
+    """{chave: nome certo} de todos os nomes e variações, lido de uma vez (2 consultas).
+
+    O download usa isto na memória, em vez de perguntar ao SQL a cada música."""
+    if not anexado(conexao):
+        return {}
+    saida: dict[str, str] = {}
+    for k, nome in conexao.execute(f"SELECT chave, nome FROM {ESQUEMA}.artistas"):
+        saida[str(k)] = str(nome)
+    for k, nome in conexao.execute(
+            f"SELECT v.chave, a.nome FROM {ESQUEMA}.variantes v JOIN {ESQUEMA}.artistas a ON a.id = v.artista_id"):
+        saida.setdefault(str(k), str(nome))
+    return saida
+
+
 @dataclass
 class Artista:
     id: int

@@ -1,28 +1,33 @@
 """Identifica o artista e o título de cada vídeo.
 
-É simples de propósito:
+Ordem (para no primeiro que responder):
 
-1. Se o YouTube/YouTube Music já diz quem é o artista (faixa oficial, clipe oficial,
-   descrição "Provided to YouTube by" ou créditos "Música neste vídeo"), vale isso.
-2. Senão, junta os nomes possíveis: artistas do banco que aparecem no título, os dois
-   lados de "Artista - Música" e o canal.
-3. Cada nome possível é procurado no banco de artistas (sql/artistas.sqlite3) e,
-   se não estiver lá, na web (página de artista no YouTube Music).
-4. Achou: CONFIRMADO. Não achou: NAO_CONFIRMADO, com o palpite mais provável
-   ("Artista - Música" → Artista; sem isso, o canal). A música é baixada do mesmo jeito,
-   na pasta do palpite; você só confere no SQL as NAO_CONFIRMADO.
+1. O código do vídeo: se o YouTube/YouTube Music já diz quem é o artista (descrição
+   "Provided to YouTube by", créditos "Música neste vídeo", faixa oficial ou clipe
+   oficial no YouTube Music), vale isso.
+2. Senão, junta os nomes possíveis (pedaços do título e o canal) e compara com as
+   pastas de artista que já existem em songs/ e com o banco de artistas. Os dois são
+   lidos uma vez no começo e ficam na memória: nenhuma consulta ao servidor nem ao SQL.
+   Uma pasta com nome de música (songs/Believer/Believer [id].mp3) ou só com faixas
+   não confirmadas não conta.
+3. Senão, busca no YouTube Music com o título: vale o resultado em que o nome da
+   música E o artista batem com um dos palpites (um nome de música nunca vira artista).
+4. Senão, compara a mesma busca com o vídeo: mesmo título e mesma duração (até 2 s).
+5. Nada disso: NAO_CONFIRMADO, com o palpite "Artista - Música" (sem isso, o canal).
+   A música é baixada do mesmo jeito, na pasta do palpite.
 
 A biblioteca ytmusicapi faz as consultas ao YouTube Music (sem login). Sem ela,
-só o banco de artistas confirma.
+valem os passos 1 (só os dados do vídeo), 2 e 5.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import textos as tx
 from verbose import v, vv
@@ -35,19 +40,28 @@ FONTE_MUSICA = "youtube_music"                # o vídeo é a faixa oficial no Y
 FONTE_DESCRICAO = "youtube_music_descricao"   # descrição "Provided to YouTube by"
 FONTE_CLIPE = "youtube_music_clipe"           # clipe oficial no YouTube Music
 FONTE_CREDITOS = "youtube_creditos"           # "Música neste vídeo" do YouTube
+FONTE_PASTA = "pasta_artista"                 # nome possível que já tem pasta em songs/
 FONTE_BANCO = "banco_artistas"                # nome possível achado no banco de artistas
-FONTE_WEB = "youtube_music_artista"           # nome possível achado como artista no YouTube Music
+FONTE_BUSCA = "youtube_music_busca"           # busca: música e artista batem com o palpite
+FONTE_COMPARACAO = "youtube_music_duracao"    # busca: mesmo título e mesma duração do vídeo
+FONTE_WEB = "youtube_music_artista"           # (antigo) nome achado como artista no YouTube Music
+FONTE_MANUAL = "manual"                       # correção sua
 FONTE_LOCAL = "local"                         # tags do MP3 / identificação anterior
 FONTE_TITULO = "titulo"                       # palpite: "Artista - Música"
+FONTE_TITULO_INVERTIDO = "titulo_invertido"   # palpite: "Música - Artista"
 FONTE_CANAL = "canal"                         # palpite: nome do canal
 
 FONTES_OFICIAIS = {FONTE_MUSICA, FONTE_DESCRICAO, FONTE_CLIPE, FONTE_CREDITOS}
-FONTES_CONFIAVEIS = FONTES_OFICIAIS | {FONTE_BANCO, FONTE_WEB}
+FONTES_CATALOGO = FONTES_OFICIAIS | {FONTE_BUSCA, FONTE_COMPARACAO}  # título/artistas oficiais
+FONTES_CONFIAVEIS = FONTES_CATALOGO | {FONTE_PASTA, FONTE_BANCO, FONTE_WEB}
 DESCRICAO_FONTE = {
     FONTE_MUSICA: "faixa oficial no YouTube Music", FONTE_DESCRICAO: "descrição do YouTube Music",
     FONTE_CLIPE: "clipe oficial no YouTube Music", FONTE_CREDITOS: "créditos de música do YouTube",
-    FONTE_BANCO: "banco de artistas", FONTE_WEB: "artista no YouTube Music",
-    FONTE_LOCAL: "tags do MP3", FONTE_TITULO: "título do vídeo", FONTE_CANAL: "nome do canal",
+    FONTE_PASTA: "pasta de artista em songs/", FONTE_BANCO: "banco de artistas",
+    FONTE_BUSCA: "música e artista no YouTube Music", FONTE_COMPARACAO: "YouTube Music × YouTube (título e duração)",
+    FONTE_WEB: "artista no YouTube Music", FONTE_MANUAL: "correção manual",
+    FONTE_LOCAL: "tags do MP3", FONTE_TITULO: "título do vídeo", FONTE_TITULO_INVERTIDO: "título do vídeo (invertido)",
+    FONTE_CANAL: "nome do canal",
 }
 
 TAMANHO_CAPA = "=w544-h544-l90-rj"
@@ -126,18 +140,6 @@ class ClienteYTMusic:
             return []
         dados = self._chamar(("busca", consulta), lambda api: api.search(consulta, filter="songs", limit=limite))
         return [f for f in (ler_faixa(d) for d in dados or [] if isinstance(d, Mapping)) if f]
-
-    def artista(self, nome: str) -> str | None:
-        """O nome como está no YouTube Music, se existe um artista com esse nome; senão None."""
-        nome = re.sub(r"\s{2,}", " ", str(nome or "")).strip()
-        if not nome:
-            return None
-        dados = self._chamar(("artista", nome), lambda api: api.search(nome, filter="artists", limit=5))
-        for item in dados or []:
-            achado = tx._text(item.get("artist") or item.get("title")) if isinstance(item, Mapping) else ""
-            if achado and tx._sem_espaco(achado) == tx._sem_espaco(nome):
-                return achado
-        return None
 
     def album(self, browse_id: str) -> dict[str, Any] | None:
         if not browse_id:
@@ -293,6 +295,104 @@ def _com_versao(titulo: str, video: str) -> str:
     return f"{titulo} ({' + '.join(sorted(faltam))})"
 
 
+# --------------------------------------------------------------- artistas que já existem
+
+
+def _chave(nome: Any) -> str:
+    """Nome comparável: sem acento, caixa, pontuação nem espaço ("AC/DC" = "AC_DC" = "acdc")."""
+    return tx._sem_espaco(str(nome or ""))
+
+
+def _titulo_do_arquivo(arquivo: str) -> str:
+    """"Believer [7wtfhZwyrcc].mp3" -> "Believer"."""
+    return re.sub(r"\s*\[[^\]]*\]\s*$", "", os.path.splitext(arquivo)[0]).strip()
+
+
+class ArtistasConhecidos:
+    """Artistas que já existem na sua biblioteca, lidos uma vez e guardados na memória:
+
+    - as pastas de `songs/` (uma pasta por artista);
+    - o banco de artistas (nome certo e variações), lido de uma vez só no começo.
+
+    Assim cada música é conferida sem consultar o SQL nem o servidor.
+
+    Uma pasta NÃO conta como artista quando:
+    - tem o nome de uma música que está dentro dela (`songs/Believer/Believer [id].mp3`):
+      é a confusão antiga de título no lugar do artista;
+    - só tem faixas NAO_CONFIRMADO (`duvidosos`): foi criada por um palpite que ninguém conferiu.
+    """
+
+    PASTAS_DO_SISTEMA = {"_pendentes", "_observar", "_library", "artista desconhecido"}
+
+    def __init__(self, pasta_musicas: str = "", banco: Mapping[str, str] | None = None,
+                 duvidosos: Iterable[str] = ()):
+        self.banco: dict[str, str] = {}
+        for k, nome in (banco or {}).items():
+            if _chave(k) and nome:
+                self.banco[_chave(k)] = nome
+        self.pastas: dict[str, str] = {}
+        self.ignoradas: dict[str, str] = {}
+        if pasta_musicas:
+            self._ler_pastas(pasta_musicas, {_chave(d) for d in duvidosos if _chave(d)})
+
+    def _ler_pastas(self, pasta_musicas: str, duvidosos: set[str]) -> None:
+        try:
+            entradas = [e for e in os.scandir(pasta_musicas) if e.is_dir()]
+        except OSError:
+            return
+        for entrada in entradas:
+            nome = entrada.name
+            k = _chave(nome)
+            if not k or nome.casefold() in self.PASTAS_DO_SISTEMA or nome.startswith("_"):
+                continue
+            if k in self.banco:  # o banco já diz que é artista
+                self.pastas[k] = nome
+                continue
+            try:
+                titulos = {_chave(tx._sem_parenteses(_titulo_do_arquivo(a.name)))
+                           for a in os.scandir(entrada.path) if a.name.lower().endswith(".mp3")}
+            except OSError:
+                titulos = set()
+            if k in titulos:
+                self.ignoradas[nome] = "nome de música"
+            elif k in duvidosos:
+                self.ignoradas[nome] = "só faixas não confirmadas"
+            else:
+                self.pastas[k] = nome
+        if self.ignoradas:
+            v("Identificação", f"{len(self.ignoradas)} pasta(s) não contam como artista: " + ", ".join(
+                f"'{n}' ({m})" for n, m in list(self.ignoradas.items())[:8]))
+        v("Identificação", f"{len(self.pastas)} pasta(s) de artista em {pasta_musicas}")
+
+    def achar(self, nome: Any) -> tuple[str, str] | None:
+        """(nome certo, fonte) se o artista já existe no banco ou numa pasta; senão None."""
+        k = _chave(nome)
+        if not k:
+            return None
+        if k in self.banco:
+            return self.banco[k], FONTE_BANCO
+        if k in self.pastas:
+            pasta = self.pastas[k]
+            # a pasta troca / : ? etc. por "_": nesse caso o nome como veio é a grafia certa
+            return (str(nome).strip() if "_" in pasta else pasta), FONTE_PASTA
+        return None
+
+    def canonico(self, nome: Any) -> str | None:
+        achado = self.achar(nome)
+        return achado[0] if achado else None
+
+    def nomes(self) -> list[str]:
+        """Para procurar o artista dentro do título do vídeo."""
+        return list(dict.fromkeys(list(self.banco.values()) + [
+            p for p in self.pastas.values() if "_" not in p]))
+
+    def aprender(self, nome: Any) -> None:
+        """Um artista confirmado agora vale para as próximas músicas desta execução."""
+        k = _chave(nome)
+        if k and k not in self.banco:
+            self.banco[k] = str(nome).strip()
+
+
 # --------------------------------------------------------------- identificação
 
 
@@ -326,7 +426,21 @@ def _detalhes_do_album(cliente: ClienteYTMusic | None, achado: dict[str, Any]) -
 
 def _fonte_oficial(cliente: ClienteYTMusic | None, video_id: str, yt: Mapping[str, Any],
                    titulo_video: str) -> dict[str, Any] | None:
-    """O que o próprio YouTube/YouTube Music diz da música; None se não diz nada."""
+    """Passo 1, o código do vídeo: o que o próprio YouTube/YouTube Music diz da música.
+
+    Primeiro o que já veio com o vídeo (descrição "Provided to YouTube by", créditos
+    "Música neste vídeo"), que não custa consulta; depois o vídeo no YouTube Music."""
+    d = yt.get("youtube_music") or {}
+    if d.get("title") and d.get("artists"):
+        return {"title": d["title"], "artists": list(d["artists"]), "album": d.get("album") or "",
+                "year": (d.get("date") or "")[:4], "fonte": FONTE_DESCRICAO}
+    if yt.get("artists") and yt.get("fonte_artistas") == "youtube":
+        titulo = yt.get("track") or ""
+        if not titulo:  # crédito sem o nome da faixa: a música é o resto do título do vídeo
+            no_titulo = tx.artista_nas_partes(limpar_titulo(titulo_video), yt["artists"])
+            titulo = no_titulo[2] if no_titulo else limpar_titulo(titulo_video)
+        return {"title": titulo, "artists": list(yt["artists"]), "album": yt.get("album") or "",
+                "year": (yt.get("release_date") or "")[:4], "fonte": FONTE_CREDITOS}
     faixa = cliente.faixa(video_id) if cliente and video_id else None
     if faixa and faixa["artists"] and faixa["tipo"] == "musica":
         return _de_faixa(faixa, FONTE_MUSICA)
@@ -340,26 +454,16 @@ def _fonte_oficial(cliente: ClienteYTMusic | None, video_id: str, yt: Mapping[st
         if no_titulo:  # "Artista - Música (Official Video)" como título do clipe
             achado["title"] = no_titulo[2]
         return achado
-    d = yt.get("youtube_music") or {}
-    if d.get("title") and d.get("artists"):
-        return {"title": d["title"], "artists": list(d["artists"]), "album": d.get("album") or "",
-                "year": (d.get("date") or "")[:4], "fonte": FONTE_DESCRICAO}
-    if yt.get("artists") and yt.get("fonte_artistas") == "youtube":
-        titulo = yt.get("track") or ""
-        if not titulo:  # crédito sem o nome da faixa: a música é o resto do título do vídeo
-            no_titulo = tx.artista_nas_partes(limpar_titulo(titulo_video), yt["artists"])
-            titulo = no_titulo[2] if no_titulo else limpar_titulo(titulo_video)
-        return {"title": titulo, "artists": list(yt["artists"]), "album": yt.get("album") or "",
-                "year": (yt.get("release_date") or "")[:4], "fonte": FONTE_CREDITOS}
     return None
 
 
 def nomes_possiveis(titulo_video: str, canal: str, conhecidos: Sequence[str]) -> list[dict[str, Any]]:
     """Palpites de (artistas, título), do mais provável para o menos provável.
 
-    - um artista do banco que aparece no título;
+    - um artista conhecido (banco/pasta) que aparece no título;
     - "Artista - Música" (o lado esquerdo) e, se for o contrário, "Música - Artista";
-    - o canal, com o título inteiro como nome da música."""
+    - o canal, com o título inteiro como nome da música.
+    Palpite em que o "artista" e a "música" são o mesmo texto é descartado."""
     limpo = limpar_titulo(titulo_video)
     partes = tx.partes_do_titulo(limpo) or [limpo]
     palpites: list[dict[str, Any]] = []
@@ -369,24 +473,74 @@ def nomes_possiveis(titulo_video: str, canal: str, conhecidos: Sequence[str]) ->
         palpites.append({"artists": tx.dividir_artistas(partes[0], conhecidos), "title": partes[1],
                          "fonte": FONTE_TITULO})
         palpites.append({"artists": tx.dividir_artistas(partes[-1], conhecidos), "title": partes[0],
-                         "fonte": FONTE_TITULO})
+                         "fonte": FONTE_TITULO_INVERTIDO})
     if canal:
         palpites.append({"artists": [canal], "title": limpo, "fonte": FONTE_CANAL})
     vistos, unicos = set(), []
     for p in palpites:
         p["artists"] = [a.lstrip("@").strip() for a in p["artists"] if a.lstrip("@").strip()]
-        chave = tuple(tx._sem_espaco(a) for a in p["artists"])
-        if p["artists"] and chave not in vistos:
+        if not p["artists"] or not _chave(p["title"]) or _chave(p["artists"][0]) == _chave(p["title"]):
+            continue
+        chave = (tuple(_chave(a) for a in p["artists"]), _chave(p["title"]))
+        if chave not in vistos:
             vistos.add(chave)
             unicos.append(p)
     return unicos
+
+
+def _titulo_base(titulo: Any) -> str:
+    """Título sem "(feat. ...)" e sem parênteses, para comparar."""
+    return _chave(tx._sem_parenteses(_feat_do_titulo(tx._text(titulo))[0]))
+
+
+def _titulo_bate(catalogo: str, esperado: str) -> bool:
+    a, b = _titulo_base(catalogo), _titulo_base(esperado)
+    return bool(a and b) and (a == b or tx._similarity(a, b) >= 0.9)
+
+
+def _busca_artista_titulo(resultados: Sequence[Mapping[str, Any]], palpites: Sequence[Mapping[str, Any]],
+                          titulo_video: str) -> dict[str, Any] | None:
+    """Passo 3: um resultado do YouTube Music cujo título é a música do palpite E cujo artista
+    é o artista do palpite. Os dois têm que bater: um nome de música nunca vira artista."""
+    versao = versoes(titulo_video)
+    for palpite in palpites:
+        principal = palpite["artists"][0]
+        for c in resultados:
+            if not c.get("artists") or versoes(c["title"]) != versao:
+                continue
+            if _titulo_bate(c["title"], palpite["title"]) and any(tx._mesmo_nome(a, principal) for a in c["artists"]):
+                v("Identificação", f"YouTube Music: '{' & '.join(c['artists'])} — {c['title']}' "
+                                   f"bate com o palpite '{principal} — {palpite['title']}'")
+                return dict(c)
+    return None
+
+
+def _comparar_com_youtube(resultados: Sequence[Mapping[str, Any]], titulo_video: str,
+                          duracao: float) -> dict[str, Any] | None:
+    """Passo 4: sem artista que bata, compara os dados do YouTube Music com os do vídeo:
+    o nome da música tem que ser o título do vídeo (ou um pedaço dele), a versão igual
+    e a duração a mesma (até 2 s de diferença)."""
+    if not duracao:
+        return None
+    limpo = limpar_titulo(titulo_video)
+    pedacos = [limpo] + (tx.partes_do_titulo(limpo) or [])
+    versao = versoes(titulo_video)
+    for c in resultados:
+        if not c.get("artists") or not c.get("duration") or abs(c["duration"] - duracao) > 2:
+            continue
+        if versoes(c["title"]) == versao and any(_titulo_bate(c["title"], p) for p in pedacos):
+            v("Identificação", f"YouTube Music × YouTube: '{' & '.join(c['artists'])} — {c['title']}' "
+                               f"tem o mesmo título e a mesma duração ({c['duration']}s)")
+            return dict(c)
+    return None
 
 
 def identificar(
     meta: Mapping[str, Any],
     *,
     cliente: ClienteYTMusic | None = None,
-    no_banco: Callable[[str], str | None] = lambda nome: None,
+    artistas: ArtistasConhecidos | None = None,
+    no_banco: Callable[[str], str | None] | None = None,
     conhecidos: Sequence[str] = (),
     dados_locais: Mapping[str, Any] | None = None,
     sem_dados_youtube: bool = False,
@@ -394,8 +548,31 @@ def identificar(
 ) -> dict[str, Any]:
     """Resultado no formato do banco: status, metadata, provenance, observations...
 
-    `no_banco(nome)` devolve o nome certo do artista se ele está no banco de artistas.
+    Ordem (para no primeiro que responder):
+    1. o código do vídeo: o YouTube/YouTube Music diz quem é (faixa oficial, clipe,
+       descrição, créditos);
+    2. os nomes possíveis do título/canal comparados com as pastas de artista que já
+       existem e com o banco de artistas (na memória: sem servidor e sem SQL);
+    3. busca no YouTube Music com o título: vale o resultado em que a música E o artista
+       batem com um palpite;
+    4. a mesma busca comparada com o vídeo: mesmo título e mesma duração;
+    5. nada disso: NAO_CONFIRMADO, com o palpite "Artista - Música" (ou o canal).
+
+    `artistas`: pastas + banco de artistas na memória. Sem ele, `no_banco(nome)` e
+    `conhecidos` fazem o papel do banco (como antes).
     `forcar` = {"title": ..., "artists": [...]}: uma correção sua, que vale no lugar das fontes."""
+    if artistas is None:
+        artistas = ArtistasConhecidos()
+        for nome in conhecidos:
+            artistas.banco.setdefault(_chave(nome), (no_banco(nome) if no_banco else None) or nome)
+    if no_banco is not None:
+        _achar = artistas.achar
+
+        def achar(nome: Any) -> tuple[str, str] | None:
+            return _achar(nome) or ((certo, FONTE_BANCO) if (certo := no_banco(str(nome))) else None)
+    else:
+        achar = artistas.achar
+
     yt = tx.dados_youtube({} if sem_dados_youtube else meta)
     video_id = tx._text(meta.get("id"))
     local = dict(dados_locais or {})
@@ -404,57 +581,71 @@ def identificar(
     curador = bool(tx._CANAL_CURADOR.search(yt["uploader"] or "") or yt.get("descricao_reupload"))
     consultar_web = bool(cliente) and not sem_dados_youtube
     observacoes: list[str] = []
+    nomes_conhecidos = artistas.nomes() or list(conhecidos)
 
-    def confirmar(nome: str) -> tuple[str, str] | None:
-        """(nome certo, fonte) se o nome está no banco ou é um artista no YouTube Music."""
-        if (certo := no_banco(nome)):
-            v("Identificação", f"'{nome}' está no banco de artistas" + (f" como '{certo}'" if certo != nome else ""))
-            return certo, FONTE_BANCO
-        if consultar_web and (certo := cliente.artista(nome)):
-            v("Identificação", f"'{nome}' é um artista no YouTube Music")
-            return certo, FONTE_WEB
-        return None
-
+    # 1. código do vídeo / correção sua
     achado: dict[str, Any] | None = None
     if forcar and forcar.get("artists"):
         achado = {"title": tx._text(forcar.get("title")) or limpar_titulo(titulo_video),
-                  "artists": list(forcar["artists"]), "album": yt["album"], "fonte": "manual"}
+                  "artists": list(forcar["artists"]), "album": yt["album"], "fonte": FONTE_MANUAL}
     if achado is None and not sem_dados_youtube:
         achado = _fonte_oficial(cliente, video_id, yt, titulo_video)
-    if achado is None and yt["fonte_artistas"] == "cache" and yt["artists"]:
-        achado = {"title": tx._text(meta.get("title")), "artists": list(yt["artists"]),
-                  "album": yt["album"], "fonte": FONTE_LOCAL}
-    if achado is None and sem_dados_youtube and local.get("title") and local.get("artists"):
-        achado = {"title": tx._text(local["title"]), "artists": tx._artists(local["artists"]),
-                  "album": tx._text(local.get("album")), "fonte": FONTE_LOCAL}
+    confirmado = achado is not None
 
-    if achado is not None:
-        confirmado = achado["fonte"] in FONTES_OFICIAIS or achado["fonte"] == "manual"
-        if not confirmado and achado["artists"] and (ok := confirmar(achado["artists"][0])):
-            achado["artists"][0], achado["fonte"] = ok
-            confirmado = True
-    else:
-        palpites = nomes_possiveis(titulo_video, canal, conhecidos)
+    if achado is None:
+        palpites: list[dict[str, Any]] = []
+        if yt["fonte_artistas"] == "cache" and yt["artists"]:
+            palpites.append({"title": limpar_titulo(meta.get("title")) or limpar_titulo(titulo_video),
+                             "artists": list(yt["artists"]), "album": yt["album"], "fonte": FONTE_LOCAL})
+        if sem_dados_youtube and local.get("title") and local.get("artists"):
+            palpites.append({"title": tx._text(local["title"]), "artists": tx._artists(local["artists"]),
+                             "album": tx._text(local.get("album")), "fonte": FONTE_LOCAL})
+        if not sem_dados_youtube or not palpites:
+            palpites += nomes_possiveis(titulo_video, canal, nomes_conhecidos)
         vv("Identificação", "nomes possíveis: " + ("; ".join(
             f"{' & '.join(p['artists'])} — {p['title']}" for p in palpites) or "nenhum"))
-        confirmado = False
+
+        # 2. pastas e banco de artistas (sem servidor)
         for palpite in palpites:
             principal = palpite["artists"][0]
-            if palpite["fonte"] == FONTE_CANAL and curador:
-                if (certo := no_banco(principal)):  # canal de re-upload só vale se já está no banco
-                    palpite["artists"][0], palpite["fonte"] = certo, FONTE_BANCO
-                    achado, confirmado = palpite, True
-                    break
+            ok = achar(principal)
+            if not ok:
                 continue
-            if (ok := confirmar(principal)):
-                palpite["artists"][0], palpite["fonte"] = ok
-                achado, confirmado = palpite, True
-                break
+            if palpite["fonte"] == FONTE_TITULO_INVERTIDO and achar(palpite["title"]):
+                continue  # "A - B" com A e B conhecidos: fica com o lado esquerdo, não inverte
+            v("Identificação", f"'{principal}' já existe ({DESCRICAO_FONTE[ok[1]]}" +
+              (f" como '{ok[0]}'" if ok[0] != principal else "") + ")")
+            achado = dict(palpite)
+            achado["artists"] = [ok[0]] + list(palpite["artists"][1:])
+            achado["fonte"], confirmado = ok[1], True
+            break
+
+        # 3 e 4. YouTube Music: artista + título; senão título + duração
+        if achado is None and consultar_web and palpites:
+            validos = [p for p in palpites if not (p["fonte"] == FONTE_CANAL and curador)]
+            limpo = limpar_titulo(titulo_video)
+            consultas = [limpo]
+            for p in validos:  # artista que não está no título (o canal, por exemplo) vai junto na busca
+                if _chave(p["artists"][0]) not in _chave(limpo):
+                    consultas.append(f"{p['artists'][0]} {p['title']}")
+            resultados: list[dict[str, Any]] = []
+            for consulta in list(dict.fromkeys(consultas))[:2]:
+                resultados += cliente.buscar(consulta, limite=10)
+                if (c := _busca_artista_titulo(resultados, validos, titulo_video)):
+                    achado, confirmado = _de_faixa(c, FONTE_BUSCA), True
+                    break
+            if achado is None and (c := _comparar_com_youtube(resultados, titulo_video, yt["duration"])):
+                achado, confirmado = _de_faixa(c, FONTE_COMPARACAO), True
+
         if achado is None:
-            achado = palpites[0] if palpites else {"title": limpar_titulo(titulo_video), "artists": [],
-                                                   "fonte": FONTE_TITULO}
+            sem_curador = [p for p in palpites if not (p["fonte"] == FONTE_CANAL and curador)]
+            achado = dict((sem_curador or palpites or [{"title": limpar_titulo(titulo_video), "artists": [],
+                                                        "fonte": FONTE_TITULO}])[0])
+            if achado["fonte"] == FONTE_TITULO_INVERTIDO:
+                achado["fonte"] = FONTE_TITULO
             nomes = ", ".join(f"'{p['artists'][0]}'" for p in palpites) or "nenhum"
-            observacoes.append(f"artista não achado no banco nem no YouTube Music (nomes possíveis: {nomes})")
+            observacoes.append("artista não achado nas pastas, no banco nem no YouTube Music "
+                               f"(nomes possíveis: {nomes})")
 
     # Créditos/descrição sem álbum: procura a mesma música no catálogo só para o álbum e a capa.
     if achado["fonte"] in (FONTE_CREDITOS, FONTE_DESCRICAO) and not achado.get("album_id") and consultar_web:
@@ -468,16 +659,18 @@ def identificar(
                 break
 
     fonte = achado["fonte"]
-    oficial = fonte in FONTES_OFICIAIS
-    titulo, feat = (achado["title"], []) if oficial else _feat_do_titulo(tx._text(achado["title"]))
-    artistas = tx._limpar_nomes([no_banco(a) or a for a in list(achado["artists"]) + feat])
-    if not oficial:
+    catalogo = fonte in FONTES_CATALOGO
+    titulo, feat = (achado["title"], []) if catalogo else _feat_do_titulo(tx._text(achado["title"]))
+    nomes_finais = [artistas.canonico(a) or (no_banco(a) if no_banco else None) or a
+                     for a in list(achado["artists"]) + feat]
+    lista_artistas = tx._limpar_nomes(nomes_finais)
+    if not catalogo:
         titulo = _com_versao(titulo, titulo_video)
     album = _detalhes_do_album(cliente, achado) if achado.get("album_id") else {}
     capa = album.get("capa") or achado.get("capa") or ""
 
     metadata = {
-        "id": video_id, "title": titulo, "artists": artistas, "artist": (artistas or [""])[0],
+        "id": video_id, "title": titulo, "artists": lista_artistas, "artist": (lista_artistas or [""])[0],
         "album": album.get("album") or tx._text(achado.get("album")),
         "album_artists": album.get("album_artists") or [],
         "date": album.get("year") or tx._text(achado.get("year")) or yt["release_date"],
@@ -491,9 +684,9 @@ def identificar(
         "ytmusic_album_id": achado.get("album_id") or "",
         "variant": " + ".join(sorted(versoes(titulo_video))),
     }
-    if not artistas:
+    if not lista_artistas:
         observacoes.append("nenhum artista identificado")
-    status = CONFIRMADO if confirmado and artistas else NAO_CONFIRMADO
+    status = CONFIRMADO if confirmado and lista_artistas else NAO_CONFIRMADO
     provenance = {"title": fonte, "artists": fonte, "uploader": "youtube"}
     if metadata["album"]:
         provenance["album"] = fonte
@@ -501,7 +694,7 @@ def identificar(
         provenance["cover_url"] = "youtube_music"
     certeza = "confirmada" if status == CONFIRMADO else "provisoria"
 
-    v("Identificação", f"{status}: {' & '.join(artistas) or '?'} — {titulo or '?'}"
+    v("Identificação", f"{status}: {' & '.join(lista_artistas) or '?'} — {titulo or '?'}"
                        f"{' | álbum ' + metadata['album'] if metadata['album'] else ''} ({DESCRICAO_FONTE.get(fonte, fonte)})")
     return {
         "video_id": video_id,

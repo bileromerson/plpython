@@ -55,6 +55,8 @@ YTMUSIC: identificar_musica.ClienteYTMusic | None = None
 FAIXAS_PARA_PERGUNTAR: list[str] = []  # download --ask: faixas desta execução não confirmadas
 ARTISTAS_DB = ""  # --artists-db; vazio = artistas.sqlite3 ao lado do banco de músicas
 ARTISTAS_CONHECIDOS: list[str] = []  # nomes e variações do banco de artistas
+# Pastas de songs/ + banco de artistas, lidos uma vez por execução e guardados na memória.
+ARTISTAS: identificar_musica.ArtistasConhecidos | None = None
 CAPAS_BAIXADAS: dict[str, bytes | None] = {}  # cache das capas por URL nesta execução
 # Falhas de rede/servidor (502/503, timeout): somem em segundos ou minutos.
 MAX_TENTATIVAS_BLOQUEIO = 6
@@ -1017,6 +1019,37 @@ def carregar_artistas_conhecidos(conexao: sqlite3.Connection | None) -> list[str
     return list(nomes)
 
 
+def carregar_artistas(conexao: sqlite3.Connection | None) -> identificar_musica.ArtistasConhecidos:
+    """Lê uma vez as pastas de artista de songs/ e o banco de artistas (nome certo e variações).
+
+    Uma única consulta ao SQL separa os artistas que só têm faixas NAO_CONFIRMADO: as pastas
+    deles foram criadas por um palpite e não contam como artista."""
+    import banco_artistas
+
+    banco: dict[str, str] = {}
+    duvidosos: set[str] = set()
+    if conexao is not None:
+        try:
+            banco = banco_artistas.mapa(conexao)
+        except sqlite3.Error as exc:
+            v("SQL", f"banco de artistas indisponível: {exc}")
+        for nome in ARTISTAS_CONHECIDOS:  # artistas das faixas já confirmadas
+            banco.setdefault(banco_artistas.chave(nome), nome)
+        try:
+            for (artistas_json,) in conexao.execute(
+                "SELECT artists_json FROM music.music_tracks WHERE metadata_status = 'NAO_CONFIRMADO'"
+            ):
+                try:
+                    principal = (json.loads(artistas_json or "[]") or [""])[0]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if principal and banco_artistas.chave(principal) not in banco:
+                    duvidosos.add(str(principal))
+        except sqlite3.Error as exc:
+            v("SQL", f"não foi possível ler as faixas não confirmadas: {exc}")
+    return identificar_musica.ArtistasConhecidos(SONGS_DIR, banco, duvidosos)
+
+
 def aprender_artistas(conexao: sqlite3.Connection | None, resultado: dict[str, Any], origem: str) -> None:
     """Artistas de uma faixa CONFIRMADA vão para o banco de artistas (as NAO_CONFIRMADO não)."""
     import banco_artistas
@@ -1043,16 +1076,17 @@ def resolver_meta_hibrido(
     estado: sqlite3.Connection | None = None,
     forcar: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Identifica o artista: fonte oficial do YouTube, senão os nomes possíveis do título/canal
-    procurados no banco de artistas e depois na web (YouTube Music)."""
-    import banco_artistas
-
+    """Identifica o artista: código do vídeo (fonte oficial), senão os nomes possíveis do
+    título/canal nas pastas e no banco de artistas (na memória), senão a busca de música +
+    artista no YouTube Music, senão título + duração comparados com o vídeo."""
+    global ARTISTAS
+    if ARTISTAS is None:  # review/artists chamam sem passar pelo download
+        ARTISTAS = carregar_artistas(estado)
     progresso.etapa("identificando o artista")
     resultado = identificar_musica.identificar(
         meta,
         cliente=YTMUSIC,
-        no_banco=lambda nome: banco_artistas.canonico(estado, nome),
-        conhecidos=ARTISTAS_CONHECIDOS,
+        artistas=ARTISTAS,
         dados_locais=dados_locais,
         sem_dados_youtube=sem_dados_youtube,
         forcar=forcar,
@@ -1907,6 +1941,8 @@ def _processar_csv(
                                         for nome in meta.get("artists") or []:
                                             if nome not in ARTISTAS_CONHECIDOS:
                                                 ARTISTAS_CONHECIDOS.append(nome)
+                                            if ARTISTAS is not None:
+                                                ARTISTAS.aprender(nome)
                                         aprender_artistas(estado, hybrid_result, "download")
                                     if estado is not None:
                                         salvar_resolucao(estado, video_key, hybrid_result)
@@ -2039,7 +2075,7 @@ def perguntar_faltando(estado: sqlite3.Connection, args: argparse.Namespace) -> 
 
 def executar(args: argparse.Namespace) -> int:
     """Executa o downloader a partir de argumentos já interpretados (usado por plpython.py)."""
-    global YTMUSIC
+    global YTMUSIC, ARTISTAS
     verificar_diretorios(args)
     YTMUSIC = identificar_musica.ClienteYTMusic()
     criar_diretorios()
@@ -2084,6 +2120,7 @@ def executar(args: argparse.Namespace) -> int:
               "pode bloquear a conta por uso automatizado: use com moderação.")
     # Memória da biblioteca: artistas já confirmados ajudam a identificar os próximos.
     ARTISTAS_CONHECIDOS[:] = carregar_artistas_conhecidos(estado)
+    ARTISTAS = carregar_artistas(estado)
     CAPAS_BAIXADAS.clear()
     FAIXAS_PARA_PERGUNTAR.clear()
     if getattr(args, "progresso", False):
