@@ -159,16 +159,16 @@ O `download`, o `update` e o `review` regravam as M3Us a partir dos CSVs do YouT
 A música é **sempre baixada**. O programa só decide quem é o artista, nesta ordem (para no primeiro que responder):
 
 1. **Código do vídeo:** se o YouTube/YouTube Music já diz quem é o artista, vale isso: descrição **"Provided to YouTube by …"**, créditos **"Música neste vídeo"**, faixa de áudio oficial (canal "- Topic") ou clipe oficial. Dessas fontes vêm também álbum, ano, número da faixa e capa quadrada.
-2. **Pastas e banco de artistas (sem servidor):** o programa separa os **nomes possíveis** (os dois lados de `Artista - Música`, o contrário `Música - Artista`, um artista conhecido dentro do título e o canal) e compara com as **pastas que já existem em `songs/`** e com o **banco de artistas**. Os dois são lidos **uma vez** no começo e ficam na memória, então nada é consultado no servidor nem no SQL a cada música. Bateu → `CONFIRMADO`, e o MP3 vai para a pasta desse artista.
+2. **Pastas e banco de artistas (sem servidor):** o programa separa os **nomes possíveis** (os dois lados de `Artista - Música`, o contrário `Música - Artista`, um artista conhecido dentro do título e o canal) e compara com as **pastas que já existem em `songs/`** e com o **banco de artistas**. Os dois são lidos **uma vez** no começo e ficam na memória, então nada é consultado no servidor nem no SQL a cada música. Bateu → `CONFIRMADO`, e o MP3 vai para a pasta desse artista. Basta um dos artistas bater (`Frizk & snuffles` com a pasta `snuffles` confirma os dois). Também confirma quando **o canal é um dos lados do título** (`i don't wanna - snuffles` publicado pelo canal snuffles): é o artista publicando a própria música. Canal de re-upload ("Lyrics", "Records"…) não vale.
 3. **Música + artista no YouTube Music:** busca o título do vídeo (e, se o canal não está no título, `canal + título`). Só vale o resultado em que **o nome da música e o artista batem com o mesmo palpite**. Assim um nome de música nunca vira artista, mesmo que exista um artista com esse nome.
 4. **YouTube Music × YouTube:** sem artista que bata, compara os resultados com o vídeo: **mesmo nome de música, mesma versão** (slowed, remix, ao vivo…) **e mesma duração** (até 2 s de diferença).
-5. **Nada disso → `NAO_CONFIRMADO`:** o MP3 é baixado do mesmo jeito, na pasta do palpite mais provável (`Artista - Música` → Artista; sem isso, o canal). O artista **não** entra no banco de artistas até você confirmar.
+5. **Nada disso → `NAO_CONFIRMADO`:** o MP3 é baixado do mesmo jeito, na pasta do palpite mais provável (`Artista - Música` → Artista; se o lado direito tem vários artistas, como `Música - A & B`, ele; sem nada, o canal). O artista **não** entra no banco de artistas até você confirmar.
 
 **Pastas que não contam como artista** (para não repetir a confusão antiga de título no lugar do nome):
 - pasta com o nome de uma música que está dentro dela, como `songs/Believer/Believer [id].mp3`;
 - pasta que só tem faixas `NAO_CONFIRMADO` (foi criada por um palpite que ninguém conferiu). Isso sai de **uma** consulta ao SQL no começo da execução.
 
-Com `-v` aparecem quantas pastas contam e quais foram ignoradas. Se `A - B` tem os dois lados conhecidos, fica o lado esquerdo como artista.
+Com `-v` aparecem quantas pastas contam e quais foram ignoradas. Se o YouTube Music não responder (biblioteca `ytmusicapi` faltando ou desatualizada, sem rede), aparece um aviso na primeira falha: sem ele, a consulta do vídeo no YouTube Music e os passos 3 e 4 não funcionam, e quase tudo fica `NAO_CONFIRMADO`. Se `A - B` tem os dois lados conhecidos, fica o lado esquerdo como artista.
 
 | Título do vídeo (canal) | Resultado |
 |---|---|

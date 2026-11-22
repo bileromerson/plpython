@@ -133,6 +133,35 @@ class TestIdentificar(unittest.TestCase):
         r = self.rodar(video("Alok - Hear Me Now"), pastas=["Alok", "Hear Me Now"])
         self.assertEqual(r[:3], ("CONFIRMADO", ["Alok"], "Hear Me Now"))
 
+    def test_canal_do_artista_no_titulo(self):
+        r = self.rodar(video("i don't wanna - snuffles", "snuffles"))
+        self.assertEqual(r, ("CONFIRMADO", ["snuffles"], "i don't wanna", im.FONTE_CANAL_TITULO))
+
+    def test_canal_entre_varios_artistas(self):
+        r = self.rodar(video("THIS THOUGHT - Frizk & snuffles", "snuffles"))
+        self.assertEqual(r[:3], ("CONFIRMADO", ["Frizk", "snuffles"], "THIS THOUGHT"))
+
+    def test_um_dos_artistas_tem_pasta(self):
+        r = self.rodar(video("THIS THOUGHT - Frizk & snuffles", "Chill Nation"), pastas=["snuffles"])
+        self.assertEqual(r[:3], ("CONFIRMADO", ["Frizk", "snuffles"], "THIS THOUGHT"))
+
+    def test_palpite_fica_com_o_lado_dos_artistas(self):
+        r = self.rodar(video("THIS THOUGHT - Frizk & snuffles", "Chill Nation"))
+        self.assertEqual(r[:3], ("NAO_CONFIRMADO", ["Frizk", "snuffles"], "THIS THOUGHT"))
+
+    def test_canal_de_reupload_no_titulo_nao_confirma(self):
+        r = self.rodar(video("Lyrics Hub - Believer", "Lyrics Hub"))
+        self.assertEqual(r[0], "NAO_CONFIRMADO")
+
+    def test_youtube_music_fora_do_ar_avisa(self):
+        class Quebrada(APIFalsa):
+            def get_watch_playlist(self, videoId, limit=1):
+                raise ConnectionError("sem rede")
+        avisos = []
+        cliente = im.ClienteYTMusic(api=Quebrada(), pausa=0, avisar=avisos.append)
+        im.identificar(video("David Kushner - Daylight"), cliente=cliente, artistas=im.ArtistasConhecidos())
+        self.assertTrue(avisos and "não respondeu" in avisos[0])
+
 
 if __name__ == "__main__":
     unittest.main()

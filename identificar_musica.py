@@ -50,6 +50,7 @@ FONTE_LOCAL = "local"                         # tags do MP3 / identificação an
 FONTE_TITULO = "titulo"                       # palpite: "Artista - Música"
 FONTE_TITULO_INVERTIDO = "titulo_invertido"   # palpite: "Música - Artista"
 FONTE_CANAL = "canal"                         # palpite: nome do canal
+FONTE_CANAL_TITULO = "canal_no_titulo"        # o canal é um dos lados de "A - B": o artista publicou
 
 FONTES_OFICIAIS = {FONTE_MUSICA, FONTE_DESCRICAO, FONTE_CLIPE, FONTE_CREDITOS}
 FONTES_CATALOGO = FONTES_OFICIAIS | {FONTE_BUSCA, FONTE_COMPARACAO}  # título/artistas oficiais
@@ -61,7 +62,7 @@ DESCRICAO_FONTE = {
     FONTE_BUSCA: "música e artista no YouTube Music", FONTE_COMPARACAO: "YouTube Music × YouTube (título e duração)",
     FONTE_WEB: "artista no YouTube Music", FONTE_MANUAL: "correção manual",
     FONTE_LOCAL: "tags do MP3", FONTE_TITULO: "título do vídeo", FONTE_TITULO_INVERTIDO: "título do vídeo (invertido)",
-    FONTE_CANAL: "nome do canal",
+    FONTE_CANAL: "nome do canal", FONTE_CANAL_TITULO: "o próprio canal do artista (nome no título)",
 }
 
 TAMANHO_CAPA = "=w544-h544-l90-rj"
@@ -87,6 +88,7 @@ class ClienteYTMusic:
         self._ultima = 0.0
         self._cache: dict[Any, Any] = {}
         self._avisar = avisar
+        self.falhas = 0
 
     def _carregar(self) -> Any:
         if self._api is None and not self._erro:
@@ -120,6 +122,11 @@ class ClienteYTMusic:
             resposta = funcao(api)
         except Exception as exc:  # noqa: BLE001 - vídeo indisponível, rede, mudança no site
             v("YouTube Music", f"consulta falhou ({chave[0]}): {exc}")
+            self.falhas += 1
+            if self.falhas == 1:
+                self._avisar(f"Aviso: o YouTube Music não respondeu ({exc}). Sem ele, só confirmam as músicas "
+                             "cujo artista já tem pasta, está no banco ou é o próprio canal. "
+                             "Tente: pip install -U ytmusicapi")
             resposta = None
         self._ultima = time.monotonic()
         self._cache[chave] = resposta
@@ -467,8 +474,18 @@ def nomes_possiveis(titulo_video: str, canal: str, conhecidos: Sequence[str]) ->
     limpo = limpar_titulo(titulo_video)
     partes = tx.partes_do_titulo(limpo) or [limpo]
     palpites: list[dict[str, Any]] = []
+    def lado(achou: tuple[str, str, str], extra: Sequence[str] = ()) -> list[str]:
+        """Todos os artistas do pedaço em que o nome foi achado ("Frizk & snuffles")."""
+        nomes = tx.dividir_artistas(tx._sem_parenteses(achou[1]), list(conhecidos) + list(extra))
+        if not any(_chave(n) == _chave(achou[0]) for n in nomes):
+            return [achou[0]]
+        return [achou[0] if _chave(n) == _chave(achou[0]) else n for n in nomes]
+
     if conhecidos and (achou := tx.artista_nas_partes(limpo, conhecidos)):
-        palpites.append({"artists": [achou[0]], "title": achou[2], "fonte": FONTE_TITULO})
+        palpites.append({"artists": lado(achou), "title": achou[2], "fonte": FONTE_TITULO})
+    if canal and len(partes) >= 2 and (achou := tx.artista_nas_partes(limpo, [canal])):
+        # "i don't wanna - snuffles" publicado pelo canal snuffles: o lado do canal é o artista
+        palpites.append({"artists": lado(achou, [canal]), "title": achou[2], "fonte": FONTE_CANAL_TITULO})
     if len(partes) >= 2:
         palpites.append({"artists": tx.dividir_artistas(partes[0], conhecidos), "title": partes[1],
                          "fonte": FONTE_TITULO})
@@ -607,16 +624,20 @@ def identificar(
 
         # 2. pastas e banco de artistas (sem servidor)
         for palpite in palpites:
-            principal = palpite["artists"][0]
-            ok = achar(principal)
-            if not ok:
+            if palpite["fonte"] == FONTE_CANAL_TITULO and not curador:
+                v("Identificação", f"o canal '{canal}' é um dos lados do título: é o artista")
+                achado, confirmado = dict(palpite), True
+                break
+            achados = [(a, achar(a)) for a in palpite["artists"]]
+            if not any(ok for _, ok in achados):
                 continue
             if palpite["fonte"] == FONTE_TITULO_INVERTIDO and achar(palpite["title"]):
                 continue  # "A - B" com A e B conhecidos: fica com o lado esquerdo, não inverte
-            v("Identificação", f"'{principal}' já existe ({DESCRICAO_FONTE[ok[1]]}" +
-              (f" como '{ok[0]}'" if ok[0] != principal else "") + ")")
+            nome, ok = next((a, ok) for a, ok in achados if ok)
+            v("Identificação", f"'{nome}' já existe ({DESCRICAO_FONTE[ok[1]]}" +
+              (f" como '{ok[0]}'" if ok[0] != nome else "") + ")")
             achado = dict(palpite)
-            achado["artists"] = [ok[0]] + list(palpite["artists"][1:])
+            achado["artists"] = [(ok[0] if ok else a) for a, ok in achados]
             achado["fonte"], confirmado = ok[1], True
             break
 
@@ -639,8 +660,15 @@ def identificar(
 
         if achado is None:
             sem_curador = [p for p in palpites if not (p["fonte"] == FONTE_CANAL and curador)]
-            achado = dict((sem_curador or palpites or [{"title": limpar_titulo(titulo_video), "artists": [],
-                                                        "fonte": FONTE_TITULO}])[0])
+            opcoes = sem_curador or palpites
+            if opcoes:
+                # "THIS THOUGHT - Frizk & snuffles": o lado com mais de um artista é o dos artistas
+                melhor = max(range(len(opcoes)), key=lambda i: (
+                    opcoes[i]["fonte"] in (FONTE_TITULO, FONTE_TITULO_INVERTIDO) and len(opcoes[i]["artists"]) > 1
+                    and len(tx.dividir_artistas(opcoes[i]["title"])) == 1, -i))
+                achado = dict(opcoes[melhor])
+            else:
+                achado = {"title": limpar_titulo(titulo_video), "artists": [], "fonte": FONTE_TITULO}
             if achado["fonte"] == FONTE_TITULO_INVERTIDO:
                 achado["fonte"] = FONTE_TITULO
             nomes = ", ".join(f"'{p['artists'][0]}'" for p in palpites) or "nenhum"
